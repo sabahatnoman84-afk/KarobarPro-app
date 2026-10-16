@@ -1,0 +1,120 @@
+<!-- KarobarPro 58mm Thermal Receipt Template -->
+<!-- Width: 58mm (210px), ultra-compact for 2-inch thermal rolls & mobile POS -->
+<main class="bg-white w-full m-0 p-0 text-black" style="font-family: 'Courier New', monospace; font-size: 11px; width: 210px;">
+
+  <!-- Receipt Header -->
+  <header class="pt-2 pb-2 flex flex-col items-center text-center border-b border-dashed border-black">
+    <img
+      v-if="print.displayLogo && print.logo"
+      class="h-10 w-auto object-contain mb-1"
+      :src="print.logo"
+    />
+    <h2 class="font-bold text-sm tracking-tight leading-tight">{{ print.companyName }}</h2>
+    <p v-if="print.address" class="text-xs leading-tight mt-0.5 px-1">{{ print.links.address.addressDisplay }}</p>
+    <p v-if="print.phone" class="text-xs">Ph: {{ print.phone }}</p>
+    <p v-if="print.gstin" class="text-xs font-bold">GSTIN: {{ print.gstin }}</p>
+  </header>
+
+  <!-- Invoice Info -->
+  <section class="px-1 py-1.5 text-xs border-b border-dashed border-black leading-tight">
+    <div class="flex justify-between">
+      <span class="font-bold">Bill#:</span>
+      <span>{{ doc.name }}</span>
+    </div>
+    <div class="flex justify-between">
+      <span class="font-bold">Date:</span>
+      <span>{{ doc.date }}</span>
+    </div>
+    <div v-if="doc.party" class="flex justify-between">
+      <span class="font-bold">Cust:</span>
+      <span class="truncate" style="max-width: 140px;">{{ doc.party }}</span>
+    </div>
+  </section>
+
+  <!-- Items Table -->
+  <section class="px-1 py-1.5 border-b border-dashed border-black">
+    <!-- Header -->
+    <div class="flex text-xs font-bold border-b border-black pb-0.5 mb-1">
+      <div style="width: 45%">Item</div>
+      <div class="text-right" style="width: 15%">Qty</div>
+      <div class="text-right" style="width: 20%">Rate</div>
+      <div class="text-right" style="width: 20%">Amt</div>
+    </div>
+
+    <!-- Items -->
+    <div
+      v-for="(row, index) in doc.items"
+      :key="row.name"
+      class="flex text-xs py-0.5 leading-tight"
+    >
+      <div style="width: 45%" class="truncate font-medium">
+        {{ row.item }}
+      </div>
+      <div class="text-right" style="width: 15%">{{ row.qty }}</div>
+      <div class="text-right" style="width: 20%">{{ row.rate }}</div>
+      <div class="text-right font-medium" style="width: 20%">{{ row.amount }}</div>
+    </div>
+  </section>
+
+  <!-- Totals Section -->
+  <section class="px-1 py-1.5 text-xs border-b border-dashed border-black space-y-0.5">
+    <div class="flex justify-between">
+      <span>Subtotal:</span>
+      <span>{{ doc.netTotal }}</span>
+    </div>
+
+    <div v-if="doc.totalDiscount" class="flex justify-between text-red-700">
+      <span>Disc:</span>
+      <span>-{{ doc.totalDiscount }}</span>
+    </div>
+
+    <div
+      v-for="tax in doc.taxes"
+      :key="tax.name"
+      class="flex justify-between"
+    >
+      <span>{{ tax.account }}:</span>
+      <span>{{ tax.amount }}</span>
+    </div>
+
+    <div class="flex justify-between font-bold text-sm border-t border-black pt-1 mt-1">
+      <span>TOTAL:</span>
+      <span>{{ doc.grandTotal }}</span>
+    </div>
+
+    <div
+      v-if="doc.outstandingAmount && doc.outstandingAmount !== '0.00'"
+      class="flex justify-between text-xs font-bold pt-0.5"
+    >
+      <span>Balance Due:</span>
+      <span>{{ doc.outstandingAmount }}</span>
+    </div>
+  </section>
+
+  <!-- UPI / QR Payment -->
+  <section v-if="doc.paymentQr || print.upiId || print.phone" class="px-1 py-2 flex flex-col items-center border-b border-dashed border-black">
+    <p class="text-xs font-bold text-center mb-1">SCAN & PAY</p>
+    <img
+      v-if="doc.paymentQr"
+      class="w-20 h-20 border border-gray-300 p-0.5 bg-white"
+      :src="doc.paymentQr"
+      alt="UPI QR"
+    />
+    <img
+      v-else-if="print.upiId || print.phone"
+      class="w-20 h-20 border border-gray-300 p-0.5 bg-white"
+      :src="`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=upi://pay?pa=${encodeURIComponent(print.upiId || (print.phone || '').replace(/[^0-9]/g, '') + '@upi')}&pn=${encodeURIComponent(print.companyName || 'Store')}&am=${encodeURIComponent(doc.grandTotal || '')}&tn=${encodeURIComponent('Invoice ' + doc.name)}`"
+      alt="UPI QR"
+      onerror="this.style.display='none'"
+    />
+    <p v-if="print.upiId" class="text-xs text-center mt-0.5 truncate" style="max-width: 190px;">{{ print.upiId }}</p>
+    <p v-else-if="print.phone" class="text-xs text-center mt-0.5">{{ print.phone }}</p>
+  </section>
+
+  <!-- Footer -->
+  <div class="py-2 text-center text-xs">
+    <p class="font-bold">Thank You! Visit Again</p>
+    <p class="text-gray-500" style="font-size: 9px;">KarobarPro POS</p>
+  </div>
+
+</main>

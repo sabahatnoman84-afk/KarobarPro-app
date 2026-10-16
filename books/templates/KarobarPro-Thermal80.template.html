@@ -1,0 +1,140 @@
+<!-- KarobarPro 80mm Thermal Receipt Template -->
+<!-- Width: 80mm (302px), optimized for thermal receipt printers -->
+<main class="bg-white w-full m-0 p-0" style="font-family: 'Courier New', monospace; font-size: 12px; width: 302px;">
+
+  <!-- Receipt Header -->
+  <header class="pt-4 pb-2 flex flex-col items-center text-center border-b border-dashed border-black">
+    <img
+      v-if="print.displayLogo && print.logo"
+      class="h-14 w-auto object-contain mb-2"
+      :src="print.logo"
+    />
+    <h2 class="font-bold text-base">{{ print.companyName }}</h2>
+    <p v-if="print.address" class="text-xs mt-0.5 px-2">{{ print.links.address.addressDisplay }}</p>
+    <p v-if="print.phone" class="text-xs">Ph: {{ print.phone }}</p>
+    <p v-if="print.email" class="text-xs">{{ print.email }}</p>
+    <p v-if="print.gstin" class="text-xs mt-1 font-bold">GSTIN: {{ print.gstin }}</p>
+  </header>
+
+  <!-- Invoice Info -->
+  <section class="px-2 py-2 text-xs border-b border-dashed border-black">
+    <div class="flex justify-between">
+      <span class="font-bold">Invoice#</span>
+      <span>{{ doc.name }}</span>
+    </div>
+    <div class="flex justify-between mt-0.5">
+      <span class="font-bold">Date</span>
+      <span>{{ doc.date }}<span v-if="doc.time"> {{ doc.time }}</span></span>
+    </div>
+    <div v-if="doc.party" class="flex justify-between mt-0.5">
+      <span class="font-bold">Customer</span>
+      <span class="text-right">{{ doc.party }}</span>
+    </div>
+  </section>
+
+  <!-- Items -->
+  <section class="px-2 py-2 border-b border-dashed border-black">
+    <!-- Header row -->
+    <div class="flex text-xs font-bold border-b border-black pb-1 mb-1">
+      <div style="width: 40%">Item</div>
+      <div class="text-right" style="width: 15%">Qty</div>
+      <div class="text-right" style="width: 20%">Rate</div>
+      <div class="text-right" style="width: 25%">Amt</div>
+    </div>
+
+    <!-- Item Rows -->
+    <div
+      v-for="(row, index) in doc.items"
+      :key="row.name"
+      class="flex text-xs py-0.5"
+    >
+      <div style="width: 40%">
+        <p class="font-medium leading-tight">{{ row.item }}</p>
+      </div>
+      <div class="text-right" style="width: 15%">
+        <span v-if="row.transferUnit">{{ row.qty }}</span>
+        <span v-else>{{ row.qty }}</span>
+      </div>
+      <div class="text-right" style="width: 20%">{{ row.rate }}</div>
+      <div class="text-right font-medium" style="width: 25%">{{ row.amount }}</div>
+    </div>
+  </section>
+
+  <!-- Totals -->
+  <section class="px-2 py-2 text-xs border-b border-dashed border-black space-y-0.5">
+    <div class="flex justify-between">
+      <span>Subtotal</span>
+      <span>{{ doc.netTotal }}</span>
+    </div>
+
+    <div v-if="doc.totalDiscount && !doc.discountAfterTax" class="flex justify-between">
+      <span>Discount</span>
+      <span>- {{ doc.totalDiscount }}</span>
+    </div>
+
+    <div
+      v-for="tax in doc.taxes"
+      :key="tax.name"
+      class="flex justify-between"
+    >
+      <span>{{ tax.account }}</span>
+      <span>{{ tax.amount }}</span>
+    </div>
+
+    <div v-if="doc.totalDiscount && doc.discountAfterTax" class="flex justify-between">
+      <span>Discount</span>
+      <span>- {{ doc.totalDiscount }}</span>
+    </div>
+
+    <div class="flex justify-between font-bold text-sm border-t border-black mt-1 pt-1">
+      <span>GRAND TOTAL</span>
+      <span>{{ doc.grandTotal }}</span>
+    </div>
+
+    <div v-if="print.amountInWords" class="text-xs italic text-gray-600 mt-1">
+      {{ doc.grandTotalInWords }}
+    </div>
+  </section>
+
+  <!-- Payment Mode -->
+  <section v-if="doc.paymentDetails && doc.paymentDetails.length" class="px-2 py-2 border-b border-dashed border-black text-xs">
+    <p class="font-bold mb-1 text-center">Payment Details</p>
+    <div v-for="(p, i) in doc.paymentDetails" :key="i" class="flex justify-between">
+      <span>{{ p.paymentMethod }}</span>
+      <span>{{ p.amount }}</span>
+    </div>
+  </section>
+
+  <!-- QR Code for UPI Payment -->
+  <section v-if="doc.paymentQr || print.upiId || print.phone" class="px-2 py-3 flex flex-col items-center border-b border-dashed border-black">
+    <p class="text-xs font-bold text-center mb-1">📱 SCAN & PAY (UPI)</p>
+    <img
+      v-if="doc.paymentQr"
+      class="w-28 h-28 border border-gray-300 p-0.5 bg-white"
+      :src="doc.paymentQr"
+      alt="UPI QR"
+    />
+    <img
+      v-else-if="print.upiId || print.phone"
+      class="w-28 h-28 border border-gray-300 p-0.5 bg-white"
+      :src="`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi://pay?pa=${encodeURIComponent(print.upiId || (print.phone || '').replace(/[^0-9]/g, '') + '@upi')}&pn=${encodeURIComponent(print.companyName || 'Store')}&am=${encodeURIComponent(doc.grandTotal || '')}&tn=${encodeURIComponent('Invoice ' + doc.name)}`"
+      alt="UPI QR"
+      onerror="this.style.display='none'"
+    />
+    <p v-if="print.upiId" class="text-xs text-center mt-1 font-bold">{{ print.upiId }}</p>
+    <p v-else-if="print.phone" class="text-xs text-center mt-1 font-medium">{{ print.phone }}</p>
+  </section>
+
+  <!-- Terms -->
+  <section v-if="print.displaytermsandconditions && print.termsAndConditions" class="px-2 py-2 border-b border-dashed border-black text-xs">
+    <p class="font-bold mb-0.5">Terms:</p>
+    <p class="whitespace-pre-line">{{ print.termsAndConditions }}</p>
+  </section>
+
+  <!-- Footer -->
+  <div class="py-3 flex flex-col items-center text-xs text-center">
+    <p class="font-bold">*** Thank You! Visit Again ***</p>
+    <p class="text-xs text-gray-500 mt-1">Powered by KarobarPro</p>
+  </div>
+
+</main>

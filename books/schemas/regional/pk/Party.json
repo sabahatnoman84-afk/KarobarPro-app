@@ -1,0 +1,50 @@
+{
+  "name": "Party",
+  "fields": [
+    {
+      "fieldname": "cnic",
+      "label": "CNIC",
+      "fieldtype": "Data",
+      "placeholder": "35202-1234567-8",
+      "section": "Billing",
+      "description": "Computerized National Identity Card"
+    },
+    {
+      "fieldname": "ntn",
+      "label": "NTN",
+      "fieldtype": "Data",
+      "placeholder": "1234567-8",
+      "section": "Billing",
+      "description": "National Tax Number (for registered businesses)"
+    },
+    {
+      "fieldname": "strn",
+      "label": "STRN",
+      "fieldtype": "Data",
+      "placeholder": "1234567890123",
+      "section": "Billing",
+      "description": "Sales Tax Registration Number"
+    },
+    {
+      "fieldname": "whatsappNumber",
+      "label": "WhatsApp Number",
+      "fieldtype": "Data",
+      "placeholder": "+92 300 1234567",
+      "section": "Contacts",
+      "description": "Used for sending payment reminders via WhatsApp"
+    }
+  ],
+  "quickEditFields": [
+    "email",
+    "phone",
+    "whatsappNumber",
+    "address",
+    "defaultAccount",
+    "currency",
+    "role",
+    "cnic",
+    "ntn",
+    "strn"
+  ],
+  "removeFields": ["taxId"]
+}

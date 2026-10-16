@@ -1,0 +1,13 @@
+{
+  "name": "PrintSettings",
+  "fields": [
+    {
+      "fieldname": "upiId",
+      "label": "Payment Account (JazzCash / EasyPaisa / IBAN)",
+      "fieldtype": "Data",
+      "placeholder": "0300-1234567 or PK36SCBL0000001123456702",
+      "section": "Contacts",
+      "description": "Number or IBAN shown on printed invoices as a QR code"
+    }
+  ]
+}

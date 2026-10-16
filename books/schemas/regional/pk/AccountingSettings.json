@@ -1,0 +1,32 @@
+{
+  "name": "AccountingSettings",
+  "fields": [
+    {
+      "fieldname": "ntn",
+      "label": "NTN",
+      "fieldtype": "Data",
+      "placeholder": "1234567-8",
+      "section": "Default",
+      "description": "National Tax Number issued by FBR"
+    },
+    {
+      "fieldname": "strn",
+      "label": "STRN",
+      "fieldtype": "Data",
+      "placeholder": "1234567890123",
+      "section": "Default",
+      "description": "Sales Tax Registration Number"
+    }
+  ],
+  "quickEditFields": [
+    "fullname",
+    "email",
+    "companyName",
+    "country",
+    "currency",
+    "fiscalYearStart",
+    "fiscalYearEnd",
+    "ntn",
+    "strn"
+  ]
+}
