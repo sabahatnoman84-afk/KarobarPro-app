@@ -1,0 +1,1407 @@
+﻿
+=== FOLDER STRUCTURE ===
+
+=== FILE LIST ===
+main\api.ts | 0.27 KB
+main\contactMothership.ts | 1.81 KB
+main\getLanguageMap.ts | 5.11 KB
+main\getPrintTemplates.ts | 1.35 KB
+main\helpers.ts | 2.46 KB
+main\initSheduler.ts | 0.93 KB
+main\preload.ts | 6.98 KB
+main\printHtmlDocument.ts | 0.79 KB
+main\registerAppLifecycleListeners.ts | 0.99 KB
+main\registerAutoUpdaterListeners.ts | 1.82 KB
+main\registerIpcMainActionListeners.ts | 8.32 KB
+main\registerIpcMainMessageListeners.ts | 1.66 KB
+main\registerProcessListeners.ts | 1.03 KB
+main\saveHtmlAsPdf.ts | 1.71 KB
+
+=== FILE CONTENTS ===
+======================================================================
+FILE: main\api.ts
+======================================================================
+import fetch, { RequestInit } from 'node-fetch';
+
+export async function sendAPIRequest(
+  endpoint: string,
+  options: RequestInit | undefined
+) {
+  return (await fetch(endpoint, options)).json() as unknown as {
+    [key: string]: string | number | boolean;
+  }[];
+}
+
+======================================================================
+FILE: main\contactMothership.ts
+======================================================================
+import { app } from 'electron';
+import fs from 'fs';
+import fetch from 'node-fetch';
+import path from 'path';
+import { Creds } from 'utils/types';
+import { rendererLog } from './helpers';
+import type { Main } from 'main';
+
+export function getUrlAndTokenString(): Creds {
+  const inProduction = app.isPackaged;
+  const empty: Creds = { errorLogUrl: '', telemetryUrl: '', tokenString: '' };
+  let errLogCredsPath = path.join(
+    process.resourcesPath,
+    '../creds/log_creds.txt'
+  );
+  if (!fs.existsSync(errLogCredsPath)) {
+    errLogCredsPath = path.join(__dirname, '..', '..', 'log_creds.txt');
+  }
+
+  if (!fs.existsSync(errLogCredsPath)) {
+    // eslint-disable-next-line no-console
+    !inProduction && console.log(`${errLogCredsPath} doesn't exist, can't log`);
+    return empty;
+  }
+
+  let apiKey, apiSecret, errorLogUrl, telemetryUrl;
+  try {
+    [apiKey, apiSecret, errorLogUrl, telemetryUrl] = fs
+      .readFileSync(errLogCredsPath, 'utf-8')
+      .split('\n')
+      .filter((f) => f.length);
+  } catch (err) {
+    if (!inProduction) {
+      // eslint-disable-next-line no-console
+      console.log(`logging error using creds at: ${errLogCredsPath} failed`);
+      // eslint-disable-next-line no-console
+      console.log(err);
+    }
+    return empty;
+  }
+
+  return {
+    errorLogUrl: encodeURI(errorLogUrl),
+    telemetryUrl: encodeURI(telemetryUrl),
+    tokenString: `token ${apiKey}:${apiSecret}`,
+  };
+}
+
+export async function sendError(body: string, main: Main) {
+  const { errorLogUrl, tokenString } = getUrlAndTokenString();
+  const headers = {
+    Authorization: tokenString,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  };
+
+  await fetch(errorLogUrl, { method: 'POST', headers, body }).catch((err) => {
+    rendererLog(main, err);
+  });
+}
+
+======================================================================
+FILE: main\getLanguageMap.ts
+======================================================================
+/**
+ * Language files are packaged into the binary, if
+ * newer files are available (if internet available)
+ * then those will replace the current file.
+ *
+ * Language files are fetched from the frappe/books repo
+ * the language files before storage have a ISO timestamp
+ * prepended to the file.
+ *
+ * This timestamp denotes the commit datetime, update of the file
+ * takes place only if a new update has been pushed.
+ */
+
+import { constants } from 'fs';
+import fs from 'fs/promises';
+import path from 'path';
+import { parseCSV } from 'utils/csvParser';
+import { LanguageMap } from 'utils/types';
+import fetch from 'node-fetch';
+
+const VALENTINES_DAY = 1644796800000;
+
+export async function getLanguageMap(code: string): Promise<LanguageMap> {
+  const contents = await getContents(code);
+  return getMapFromCsv(contents);
+}
+
+function getMapFromCsv(csv: string): LanguageMap {
+  const matrix = parseCSV(csv);
+  const languageMap: LanguageMap = {};
+
+  for (const row of matrix) {
+    /**
+     * Ignore lines that have no translations
+     */
+    if (!row[0] || !row[1]) {
+      continue;
+    }
+
+    const source = row[0];
+    const translation = row[1];
+    const context = row[3];
+
+    languageMap[source] = { translation };
+    if (context?.length) {
+      languageMap[source].context = context;
+    }
+  }
+
+  return languageMap;
+}
+
+async function getContents(code: string) {
+  let contents = await getContentsIfExists(code);
+  if (contents.length === 0) {
+    contents = (await fetchAndStoreFile(code)) || contents;
+  } else {
+    contents = (await getUpdatedContent(code, contents)) || contents;
+  }
+
+  if (!contents || contents.length === 0) {
+    throwCouldNotFetchFile(code);
+  }
+
+  return contents;
+}
+
+async function getContentsIfExists(code: string): Promise<string> {
+  const filePath = await getTranslationFilePath(code);
+  if (!filePath) {
+    return '';
+  }
+
+  return await fs.readFile(filePath, { encoding: 'utf-8' });
+}
+
+async function fetchAndStoreFile(code: string, date?: Date) {
+  let contents = await fetchContentsFromApi(code);
+  if (!contents) {
+    contents = await fetchContentsFromRaw(code);
+  }
+
+  if (!date && contents) {
+    date = await getLastUpdated(code);
+  }
+
+  if (contents) {
+    contents = [date!.toISOString(), contents].join('\n');
+    await storeFile(code, contents);
+  }
+
+  return contents ?? '';
+}
+
+async function fetchContentsFromApi(code: string) {
+  const url = `https://api.github.com/repos/frappe/books/contents/translations/${code}.csv`;
+  const res = await errorHandledFetch(url);
+  if (res === null || res.status !== 200) {
+    return null;
+  }
+
+  const resJson = (await res.json()) as { content: string };
+  return Buffer.from(resJson.content, 'base64').toString();
+}
+
+async function fetchContentsFromRaw(code: string) {
+  const url = `https://raw.githubusercontent.com/frappe/books/master/translations/${code}.csv`;
+  const res = await errorHandledFetch(url);
+  if (res === null || res.status !== 200) {
+    return null;
+  }
+
+  return await res.text();
+}
+
+async function getUpdatedContent(code: string, contents: string) {
+  const { shouldUpdate, date } = await shouldUpdateFile(code, contents);
+  if (!shouldUpdate) {
+    return contents;
+  }
+
+  return await fetchAndStoreFile(code, date);
+}
+
+async function shouldUpdateFile(code: string, contents: string) {
+  const date = await getLastUpdated(code);
+  const oldDate = new Date(contents.split('\n')[0]);
+  const shouldUpdate = date > oldDate || +oldDate === VALENTINES_DAY;
+
+  return { shouldUpdate, date };
+}
+
+async function getLastUpdated(code: string): Promise<Date> {
+  const url = `https://api.github.com/repos/frappe/books/commits?path=translations%2F${code}.csv&page=1&per_page=1`;
+  const res = await errorHandledFetch(url);
+  if (res === null || res.status !== 200) {
+    return new Date(VALENTINES_DAY);
+  }
+
+  const resJson = (await res.json()) as {
+    commit: { author: { date: string } };
+  }[];
+  try {
+    return new Date(resJson[0].commit.author.date);
+  } catch {
+    return new Date(VALENTINES_DAY);
+  }
+}
+
+async function getTranslationFilePath(code: string) {
+  let filePath = path.join(
+    process.resourcesPath,
+    `../translations/${code}.csv`
+  );
+
+  try {
+    await fs.access(filePath, constants.R_OK);
+  } catch {
+    /**
+     * This will be used for in Development mode
+     */
+    filePath = path.join(__dirname, `../../translations/${code}.csv`);
+  }
+
+  try {
+    await fs.access(filePath, constants.R_OK);
+  } catch {
+    return '';
+  }
+
+  return filePath;
+}
+
+function throwCouldNotFetchFile(code: string) {
+  throw new Error(`Could not fetch translations for '${code}'.`);
+}
+
+async function storeFile(code: string, contents: string) {
+  const filePath = await getTranslationFilePath(code);
+  if (!filePath) {
+    return;
+  }
+
+  const dirname = path.dirname(filePath);
+  await fs.mkdir(dirname, { recursive: true });
+  await fs.writeFile(filePath, contents, { encoding: 'utf-8' });
+}
+
+async function errorHandledFetch(url: string) {
+  try {
+    return await fetch(url);
+  } catch {
+    return null;
+  }
+}
+
+======================================================================
+FILE: main\getPrintTemplates.ts
+======================================================================
+import fs from 'fs/promises';
+import path from 'path';
+import { TemplateFile } from 'utils/types';
+
+export async function getTemplates(posTemplateWidth?: number) {
+  const paths = await getPrintTemplatePaths();
+  if (!paths) {
+    return [];
+  }
+
+  const templates: TemplateFile[] = [];
+  for (const file of paths.files) {
+    const filePath = path.join(paths.root, file);
+    const template = await fs.readFile(filePath, 'utf-8');
+    const { mtime } = await fs.stat(filePath);
+    let width = 0;
+    let height = 0;
+    if (file?.includes('Thermal58')) {
+      width = 5.8;
+      height = 20;
+    } else if (file?.includes('Thermal80') || file?.split('-')[1]?.split('.')[0] === 'POS') {
+      width = posTemplateWidth ?? 8;
+      height = 22;
+    }
+
+    templates.push({
+      template,
+      file,
+      modified: mtime.toISOString(),
+      width,
+      height,
+    });
+  }
+
+  return templates;
+}
+
+async function getPrintTemplatePaths(): Promise<{
+  files: string[];
+  root: string;
+} | null> {
+  let root = path.join(process.resourcesPath, `../templates`);
+
+  try {
+    const files = await fs.readdir(root);
+    return { files, root };
+  } catch {
+    root = path.join(__dirname, '..', '..', `templates`);
+  }
+
+  try {
+    const files = await fs.readdir(root);
+    return { files, root };
+  } catch {
+    return null;
+  }
+}
+
+======================================================================
+FILE: main\helpers.ts
+======================================================================
+import { constants } from 'fs';
+import fs from 'fs/promises';
+import { ConfigFile } from 'fyo/core/types';
+import { Main } from 'main';
+import config from 'utils/config';
+import { BackendResponse } from 'utils/ipc/types';
+import { IPC_CHANNELS } from 'utils/messages';
+import type { ConfigFilesWithModified } from 'utils/types';
+
+export async function setAndGetCleanedConfigFiles() {
+  const files = config.get('files', []);
+
+  const cleanedFileMap: Map<string, ConfigFile> = new Map();
+  for (const file of files) {
+    const exists = await fs
+      .access(file.dbPath, constants.W_OK)
+      .then(() => true)
+      .catch(() => false);
+
+    if (!file.companyName) {
+      continue;
+    }
+
+    const key = `${file.companyName}-${file.dbPath}`;
+    if (!exists || cleanedFileMap.has(key)) {
+      continue;
+    }
+
+    cleanedFileMap.set(key, file);
+  }
+
+  const cleanedFiles = Array.from(cleanedFileMap.values());
+  config.set('files', cleanedFiles);
+  return cleanedFiles;
+}
+
+export async function getConfigFilesWithModified(files: ConfigFile[]) {
+  const filesWithModified: ConfigFilesWithModified[] = [];
+  for (const { dbPath, id, companyName, openCount } of files) {
+    const { mtime } = await fs.stat(dbPath);
+    filesWithModified.push({
+      id,
+      dbPath,
+      companyName,
+      modified: mtime.toISOString(),
+      openCount,
+    });
+  }
+
+  return filesWithModified;
+}
+
+export async function getErrorHandledReponse(
+  func: () => Promise<unknown> | unknown
+) {
+  const response: BackendResponse = {};
+
+  try {
+    response.data = await func();
+  } catch (err) {
+    response.error = {
+      name: (err as NodeJS.ErrnoException).name,
+      message: (err as NodeJS.ErrnoException).message,
+      stack: (err as NodeJS.ErrnoException).stack,
+      code: (err as NodeJS.ErrnoException).code,
+    };
+  }
+
+  return response;
+}
+
+export function rendererLog(main: Main, ...args: unknown[]) {
+  main.mainWindow?.webContents.send(IPC_CHANNELS.CONSOLE_LOG, ...args);
+}
+
+export function isNetworkError(error: Error) {
+  switch (error?.message) {
+    case 'net::ERR_INTERNET_DISCONNECTED':
+    case 'net::ERR_NETWORK_CHANGED':
+    case 'net::ERR_PROXY_CONNECTION_FAILED':
+    case 'net::ERR_CONNECTION_RESET':
+    case 'net::ERR_CONNECTION_CLOSE':
+    case 'net::ERR_NAME_NOT_RESOLVED':
+    case 'net::ERR_TIMED_OUT':
+    case 'net::ERR_CONNECTION_TIMED_OUT':
+      return true;
+    default:
+      return false;
+  }
+}
+
+======================================================================
+FILE: main\initSheduler.ts
+======================================================================
+import Bree from 'bree';
+import path from 'path';
+import main from 'main';
+
+let bree: Bree;
+
+export async function initScheduler(interval: string) {
+  const jobsRoot = path.join(__dirname, '..', '..', 'jobs');
+
+  if (bree) {
+    await bree.stop();
+  }
+
+  bree = new Bree({
+    root: jobsRoot,
+    defaultExtension: 'ts',
+    jobs: [
+      {
+        name: 'triggerErpNextSync',
+        interval: interval,
+        worker: {
+          workerData: {
+            useTsNode: true,
+          },
+        },
+      },
+      {
+        name: 'checkLoyaltyProgramExpiry',
+        interval: '24 hours',
+        worker: {
+          workerData: {
+            useTsNode: true,
+          },
+        },
+      },
+    ],
+    worker: {
+      argv: ['--require', 'ts-node/register'],
+    },
+  });
+
+  bree.on('worker created', () => {
+    main.mainWindow?.webContents.send('trigger-erpnext-sync');
+  });
+
+  await bree.start();
+}
+
+======================================================================
+FILE: main\preload.ts
+======================================================================
+import type {
+  OpenDialogOptions,
+  OpenDialogReturnValue,
+  SaveDialogOptions,
+  SaveDialogReturnValue,
+} from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
+import type { ConfigMap } from 'fyo/core/types';
+import config from 'utils/config';
+import type { DatabaseMethod } from 'utils/db/types';
+import type { BackendResponse } from 'utils/ipc/types';
+import { IPC_ACTIONS, IPC_CHANNELS, IPC_MESSAGES } from 'utils/messages';
+import type {
+  ConfigFilesWithModified,
+  Creds,
+  LanguageMap,
+  SelectFileOptions,
+  SelectFileReturn,
+  TemplateFile,
+} from 'utils/types';
+
+type IPCRendererListener = Parameters<typeof ipcRenderer.on>[1];
+const ipc = {
+  desktop: true,
+
+  reloadWindow() {
+    return ipcRenderer.send(IPC_MESSAGES.RELOAD_MAIN_WINDOW);
+  },
+
+  minimizeWindow() {
+    return ipcRenderer.send(IPC_MESSAGES.MINIMIZE_MAIN_WINDOW);
+  },
+
+  toggleMaximize() {
+    return ipcRenderer.send(IPC_MESSAGES.MAXIMIZE_MAIN_WINDOW);
+  },
+
+  isMaximized() {
+    return new Promise((resolve) => {
+      ipcRenderer.send(IPC_MESSAGES.ISMAXIMIZED_MAIN_WINDOW);
+      ipcRenderer.once(
+        IPC_MESSAGES.ISMAXIMIZED_RESULT,
+        (_event, isMaximized) => {
+          resolve(isMaximized);
+        }
+      );
+    });
+  },
+
+  isFullscreen() {
+    return new Promise((resolve) => {
+      ipcRenderer.send(IPC_MESSAGES.ISFULLSCREEN_MAIN_WINDOW);
+      ipcRenderer.once(
+        IPC_MESSAGES.ISFULLSCREEN_RESULT,
+        (_event, isFullscreen) => {
+          resolve(isFullscreen);
+        }
+      );
+    });
+  },
+
+  closeWindow() {
+    return ipcRenderer.send(IPC_MESSAGES.CLOSE_MAIN_WINDOW);
+  },
+
+  async getCreds() {
+    return (await ipcRenderer.invoke(IPC_ACTIONS.GET_CREDS)) as Creds;
+  },
+
+  async getLanguageMap(code: string) {
+    return (await ipcRenderer.invoke(IPC_ACTIONS.GET_LANGUAGE_MAP, code)) as {
+      languageMap: LanguageMap;
+      success: boolean;
+      message: string;
+    };
+  },
+
+  async getTemplates(posTemplateWidth?: number): Promise<TemplateFile[]> {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.GET_TEMPLATES,
+      posTemplateWidth
+    )) as TemplateFile[];
+  },
+
+  async initScheduler(time: string) {
+    await ipcRenderer.invoke(IPC_ACTIONS.INIT_SHEDULER, time);
+  },
+
+  async selectFile(options: SelectFileOptions): Promise<SelectFileReturn> {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.SELECT_FILE,
+      options
+    )) as SelectFileReturn;
+  },
+
+  async getSaveFilePath(options: SaveDialogOptions) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.GET_SAVE_FILEPATH,
+      options
+    )) as SaveDialogReturnValue;
+  },
+
+  async getOpenFilePath(options: OpenDialogOptions) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.GET_OPEN_FILEPATH,
+      options
+    )) as OpenDialogReturnValue;
+  },
+
+  async checkDbAccess(filePath: string) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.CHECK_DB_ACCESS,
+      filePath
+    )) as boolean;
+  },
+
+  async checkForUpdates() {
+    await ipcRenderer.invoke(IPC_ACTIONS.CHECK_FOR_UPDATES);
+  },
+
+  openLink(link: string) {
+    ipcRenderer.send(IPC_MESSAGES.OPEN_EXTERNAL, link);
+  },
+
+  async deleteFile(filePath: string) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.DELETE_FILE,
+      filePath
+    )) as BackendResponse;
+  },
+
+  async saveData(data: string, savePath: string) {
+    await ipcRenderer.invoke(IPC_ACTIONS.SAVE_DATA, data, savePath);
+  },
+
+  showItemInFolder(filePath: string) {
+    ipcRenderer.send(IPC_MESSAGES.SHOW_ITEM_IN_FOLDER, filePath);
+  },
+
+  async makePDF(
+    html: string,
+    savePath: string,
+    width: number,
+    height: number
+  ): Promise<boolean> {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.SAVE_HTML_AS_PDF,
+      html,
+      savePath,
+      width,
+      height
+    )) as boolean;
+  },
+
+  async printDocument(
+    html: string,
+    width: number,
+    height: number
+  ): Promise<boolean> {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.PRINT_HTML_DOCUMENT,
+      html,
+      width,
+      height
+    )) as boolean;
+  },
+
+  async getDbList() {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.GET_DB_LIST
+    )) as ConfigFilesWithModified[];
+  },
+
+  async getDbDefaultPath(companyName: string) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.GET_DB_DEFAULT_PATH,
+      companyName
+    )) as string;
+  },
+
+  async getEnv() {
+    return (await ipcRenderer.invoke(IPC_ACTIONS.GET_ENV)) as {
+      isDevelopment: boolean;
+      platform: string;
+      version: string;
+    };
+  },
+
+  openExternalUrl(url: string) {
+    ipcRenderer.send(IPC_MESSAGES.OPEN_EXTERNAL, url);
+  },
+
+  async showError(title: string, content: string) {
+    await ipcRenderer.invoke(IPC_ACTIONS.SHOW_ERROR, { title, content });
+  },
+
+  async sendError(body: string) {
+    await ipcRenderer.invoke(IPC_ACTIONS.SEND_ERROR, body);
+  },
+
+  async sendAPIRequest(endpoint: string, options: RequestInit | undefined) {
+    return (await ipcRenderer.invoke(
+      IPC_ACTIONS.SEND_API_REQUEST,
+      endpoint,
+      options
+    )) as Promise<
+      {
+        [key: string]: string | number | boolean | Date | object | object[];
+      }[]
+    >;
+  },
+
+  registerMainProcessErrorListener(listener: IPCRendererListener) {
+    ipcRenderer.on(IPC_CHANNELS.LOG_MAIN_PROCESS_ERROR, listener);
+  },
+
+  registerTriggerFrontendActionListener(listener: IPCRendererListener) {
+    ipcRenderer.on(IPC_CHANNELS.TRIGGER_ERPNEXT_SYNC, listener);
+  },
+
+  registerConsoleLogListener(listener: IPCRendererListener) {
+    ipcRenderer.on(IPC_CHANNELS.CONSOLE_LOG, listener);
+  },
+
+  db: {
+    async getSchema() {
+      return (await ipcRenderer.invoke(
+        IPC_ACTIONS.DB_SCHEMA
+      )) as BackendResponse;
+    },
+
+    async create(dbPath: string, countryCode?: string) {
+      return (await ipcRenderer.invoke(
+        IPC_ACTIONS.DB_CREATE,
+        dbPath,
+        countryCode
+      )) as BackendResponse;
+    },
+
+    async connect(dbPath: string, countryCode?: string) {
+      return (await ipcRenderer.invoke(
+        IPC_ACTIONS.DB_CONNECT,
+        dbPath,
+        countryCode
+      )) as BackendResponse;
+    },
+
+    async call(method: DatabaseMethod, ...args: unknown[]) {
+      return (await ipcRenderer.invoke(
+        IPC_ACTIONS.DB_CALL,
+        method,
+        ...args
+      )) as BackendResponse;
+    },
+
+    async bespoke(method: string, ...args: unknown[]) {
+      return (await ipcRenderer.invoke(
+        IPC_ACTIONS.DB_BESPOKE,
+        method,
+        ...args
+      )) as BackendResponse;
+    },
+  },
+
+  store: {
+    get<K extends keyof ConfigMap>(key: K) {
+      return config.get(key);
+    },
+
+    set<K extends keyof ConfigMap>(key: K, value: ConfigMap[K]) {
+      return config.set(key, value);
+    },
+
+    delete(key: keyof ConfigMap) {
+      return config.delete(key);
+    },
+  },
+} as const;
+
+contextBridge.exposeInMainWorld('ipc', ipc);
+export type IPC = typeof ipc;
+
+======================================================================
+FILE: main\printHtmlDocument.ts
+======================================================================
+import { App } from 'electron';
+import path from 'path';
+import fs from 'fs-extra';
+import { getInitializedPrintWindow } from './saveHtmlAsPdf';
+
+export async function printHtmlDocument(
+  html: string,
+  app: App,
+  width: number,
+  height: number
+): Promise<boolean> {
+  const tempRoot = app.getPath('temp');
+  const tempFile = path.join(tempRoot, `temp-print.html`);
+  await fs.writeFile(tempFile, html, { encoding: 'utf-8' });
+
+  const printWindow = await getInitializedPrintWindow(tempFile, width, height);
+
+  const success = await new Promise<boolean>((resolve) => {
+    printWindow.webContents.print(
+      { silent: false, printBackground: true },
+      (success) => resolve(success)
+    );
+  });
+
+  printWindow.close();
+  await fs.unlink(tempFile);
+  return success;
+}
+
+======================================================================
+FILE: main\registerAppLifecycleListeners.ts
+======================================================================
+import { app } from 'electron';
+import installExtension, { VUEJS3_DEVTOOLS } from 'electron-devtools-installer';
+import { Main } from '../main';
+import { rendererLog } from './helpers';
+import { emitMainProcessError } from 'backend/helpers';
+
+export default function registerAppLifecycleListeners(main: Main) {
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  app.on('activate', () => {
+    if (main.mainWindow === null) {
+      main.createWindow().catch((err) => emitMainProcessError(err));
+    }
+  });
+
+  app.on('ready', () => {
+    if (main.isDevelopment && !main.isTest) {
+      installDevTools(main).catch((err) => emitMainProcessError(err));
+    }
+
+    main.createWindow().catch((err) => emitMainProcessError(err));
+  });
+}
+
+async function installDevTools(main: Main) {
+  try {
+    await installExtension(VUEJS3_DEVTOOLS);
+  } catch (e) {
+    rendererLog(main, 'Vue Devtools failed to install', e);
+  }
+}
+
+======================================================================
+FILE: main\registerAutoUpdaterListeners.ts
+======================================================================
+import { app, dialog } from 'electron';
+import { autoUpdater, UpdateInfo } from 'electron-updater';
+import { emitMainProcessError } from '../backend/helpers';
+import { Main } from '../main';
+import { isNetworkError } from './helpers';
+
+export default function registerAutoUpdaterListeners(main: Main) {
+  autoUpdater.autoDownload = false;
+  autoUpdater.allowPrerelease = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('error', (error) => {
+    if (!main.checkedForUpdate) {
+      main.checkedForUpdate = true;
+    }
+
+    if (isNetworkError(error)) {
+      return;
+    }
+
+    emitMainProcessError(error);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
+  autoUpdater.on('update-available', async (info: UpdateInfo) => {
+    const currentVersion = app.getVersion();
+    const nextVersion = info.version;
+    const isCurrentBeta = currentVersion.includes('beta');
+    const isNextBeta = nextVersion.includes('beta');
+
+    let downloadUpdate = true;
+    if (!isCurrentBeta && isNextBeta) {
+      const option = await dialog.showMessageBox({
+        type: 'info',
+        title: 'Update Available',
+        message: `Download version ${nextVersion}?`,
+        buttons: ['Yes', 'No'],
+      });
+
+      downloadUpdate = option.response === 0;
+    }
+
+    if (!downloadUpdate) {
+      return;
+    }
+
+    await autoUpdater.downloadUpdate();
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-misused-promises
+  autoUpdater.on('update-downloaded', async () => {
+    const option = await dialog.showMessageBox({
+      type: 'info',
+      title: 'Update Downloaded',
+      message: 'Restart Frappe Books to install update?',
+      buttons: ['Yes', 'No'],
+    });
+
+    if (option.response === 1) {
+      return;
+    }
+
+    autoUpdater.quitAndInstall();
+  });
+}
+
+======================================================================
+FILE: main\registerIpcMainActionListeners.ts
+======================================================================
+import {
+  MessageBoxOptions,
+  OpenDialogOptions,
+  SaveDialogOptions,
+  app,
+  dialog,
+  ipcMain,
+} from 'electron';
+import { autoUpdater } from 'electron-updater';
+import { constants } from 'fs';
+import fs from 'fs-extra';
+import path from 'path';
+import { SelectFileOptions, SelectFileReturn } from 'utils/types';
+import databaseManager from '../backend/database/manager';
+import { emitMainProcessError } from '../backend/helpers';
+import { Main } from '../main';
+import { DatabaseMethod } from '../utils/db/types';
+import { IPC_ACTIONS } from '../utils/messages';
+import { getUrlAndTokenString, sendError } from './contactMothership';
+import { getLanguageMap } from './getLanguageMap';
+import { getTemplates } from './getPrintTemplates';
+import { printHtmlDocument } from './printHtmlDocument';
+import {
+  getConfigFilesWithModified,
+  getErrorHandledReponse,
+  isNetworkError,
+  setAndGetCleanedConfigFiles,
+} from './helpers';
+import { saveHtmlAsPdf } from './saveHtmlAsPdf';
+import { sendAPIRequest } from './api';
+import { initScheduler } from './initSheduler';
+
+export default function registerIpcMainActionListeners(main: Main) {
+  ipcMain.handle(IPC_ACTIONS.CHECK_DB_ACCESS, async (_, filePath: string) => {
+    try {
+      await fs.access(filePath, constants.W_OK | constants.R_OK);
+    } catch (err) {
+      return false;
+    }
+
+    return true;
+  });
+
+  ipcMain.handle(
+    IPC_ACTIONS.GET_DB_DEFAULT_PATH,
+    async (_, companyName: string) => {
+      let root: string;
+      try {
+        root = app.getPath('documents');
+      } catch {
+        root = app.getPath('userData');
+      }
+
+      if (main.isDevelopment) {
+        root = 'dbs';
+      }
+
+      const dbsPath = path.join(root, 'Frappe Books');
+      const backupPath = path.join(dbsPath, 'backups');
+      await fs.ensureDir(backupPath);
+
+      let dbFilePath = path.join(dbsPath, `${companyName}.books.db`);
+
+      if (await fs.pathExists(dbFilePath)) {
+        const option = await dialog.showMessageBox({
+          type: 'question',
+          title: 'File Exists',
+          message: `Filename already exists. Do you want to overwrite the existing file or create a new one?`,
+          buttons: ['Overwrite', 'New'],
+        });
+
+        if (option.response === 1) {
+          const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, '');
+
+          dbFilePath = path.join(
+            dbsPath,
+            `${companyName}_${timestamp}.books.db`
+          );
+
+          await dialog.showMessageBox({
+            type: 'info',
+            message: `New file: ${path.basename(dbFilePath)}`,
+          });
+        }
+      }
+
+      return dbFilePath;
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.GET_OPEN_FILEPATH,
+    async (_, options: OpenDialogOptions) => {
+      return await dialog.showOpenDialog(main.mainWindow!, options);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.GET_SAVE_FILEPATH,
+    async (_, options: SaveDialogOptions) => {
+      return await dialog.showSaveDialog(main.mainWindow!, options);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.GET_DIALOG_RESPONSE,
+    async (_, options: MessageBoxOptions) => {
+      if (main.isDevelopment || main.isLinux) {
+        Object.assign(options, { icon: main.icon });
+      }
+
+      return await dialog.showMessageBox(main.mainWindow!, options);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.SHOW_ERROR,
+    (_, { title, content }: { title: string; content: string }) => {
+      return dialog.showErrorBox(title, content);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.SAVE_HTML_AS_PDF,
+    async (
+      _,
+      html: string,
+      savePath: string,
+      width: number,
+      height: number
+    ) => {
+      return await saveHtmlAsPdf(html, savePath, app, width, height);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.PRINT_HTML_DOCUMENT,
+    async (_, html: string, width: number, height: number) => {
+      return await printHtmlDocument(html, app, width, height);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.SAVE_DATA,
+    async (_, data: string, savePath: string) => {
+      return await fs.writeFile(savePath, data, { encoding: 'utf-8' });
+    }
+  );
+
+  ipcMain.handle(IPC_ACTIONS.SEND_ERROR, async (_, bodyJson: string) => {
+    await sendError(bodyJson, main);
+  });
+
+  ipcMain.handle(IPC_ACTIONS.CHECK_FOR_UPDATES, async () => {
+    if (main.isDevelopment || main.checkedForUpdate) {
+      return;
+    }
+
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (error) {
+      if (isNetworkError(error as Error)) {
+        return;
+      }
+
+      emitMainProcessError(error);
+    }
+    main.checkedForUpdate = true;
+  });
+
+  ipcMain.handle(IPC_ACTIONS.GET_LANGUAGE_MAP, async (_, code: string) => {
+    const obj = { languageMap: {}, success: true, message: '' };
+    try {
+      obj.languageMap = await getLanguageMap(code);
+    } catch (err) {
+      obj.success = false;
+      obj.message = (err as Error).message;
+    }
+
+    return obj;
+  });
+
+  ipcMain.handle(
+    IPC_ACTIONS.SELECT_FILE,
+    async (_, options: SelectFileOptions): Promise<SelectFileReturn> => {
+      const response: SelectFileReturn = {
+        name: '',
+        filePath: '',
+        success: false,
+        data: Buffer.from('', 'utf-8'),
+        canceled: false,
+      };
+      const { filePaths, canceled } = await dialog.showOpenDialog(
+        main.mainWindow!,
+        { ...options, properties: ['openFile'] }
+      );
+
+      response.filePath = filePaths?.[0];
+      response.canceled = canceled;
+
+      if (!response.filePath) {
+        return response;
+      }
+
+      response.success = true;
+      if (canceled) {
+        return response;
+      }
+
+      response.name = path.basename(response.filePath);
+      response.data = await fs.readFile(response.filePath);
+      return response;
+    }
+  );
+
+  ipcMain.handle(IPC_ACTIONS.GET_CREDS, () => {
+    return getUrlAndTokenString();
+  });
+
+  ipcMain.handle(IPC_ACTIONS.DELETE_FILE, async (_, filePath: string) => {
+    return getErrorHandledReponse(async () => await fs.unlink(filePath));
+  });
+
+  ipcMain.handle(IPC_ACTIONS.GET_DB_LIST, async () => {
+    const files = await setAndGetCleanedConfigFiles();
+    return await getConfigFilesWithModified(files);
+  });
+
+  ipcMain.handle(IPC_ACTIONS.GET_ENV, async () => {
+    let version = app.getVersion();
+    if (main.isDevelopment) {
+      const packageJson = await fs.readFile('package.json', 'utf-8');
+      version = (JSON.parse(packageJson) as { version: string }).version;
+    }
+
+    return {
+      isDevelopment: main.isDevelopment,
+      platform: process.platform,
+      version,
+    };
+  });
+
+  ipcMain.handle(
+    IPC_ACTIONS.GET_TEMPLATES,
+    async (_, posPrintWidth?: number) => {
+      return getTemplates(posPrintWidth);
+    }
+  );
+
+  ipcMain.handle(IPC_ACTIONS.INIT_SHEDULER, async (_, interval: string) => {
+    return initScheduler(interval);
+  });
+
+  ipcMain.handle(
+    IPC_ACTIONS.SEND_API_REQUEST,
+    async (e, endpoint: string, options: RequestInit | undefined) => {
+      return sendAPIRequest(endpoint, options);
+    }
+  );
+
+  /**
+   * Database Related Actions
+   */
+
+  ipcMain.handle(
+    IPC_ACTIONS.DB_CREATE,
+    async (_, dbPath: string, countryCode: string) => {
+      return await getErrorHandledReponse(async () => {
+        return await databaseManager.createNewDatabase(dbPath, countryCode);
+      });
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.DB_CONNECT,
+    async (_, dbPath: string, countryCode?: string) => {
+      return await getErrorHandledReponse(async () => {
+        return await databaseManager.connectToDatabase(dbPath, countryCode);
+      });
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.DB_CALL,
+    async (_, method: DatabaseMethod, ...args: unknown[]) => {
+      return await getErrorHandledReponse(async () => {
+        return await databaseManager.call(method, ...args);
+      });
+    }
+  );
+
+  ipcMain.handle(
+    IPC_ACTIONS.DB_BESPOKE,
+    async (_, method: string, ...args: unknown[]) => {
+      return await getErrorHandledReponse(async () => {
+        return await databaseManager.callBespoke(method, ...args);
+      });
+    }
+  );
+
+  ipcMain.handle(IPC_ACTIONS.DB_SCHEMA, async () => {
+    return await getErrorHandledReponse(() => {
+      return databaseManager.getSchemaMap();
+    });
+  });
+}
+
+======================================================================
+FILE: main\registerIpcMainMessageListeners.ts
+======================================================================
+import { ipcMain, Menu, shell } from 'electron';
+import { Main } from '../main';
+import { IPC_MESSAGES } from '../utils/messages';
+import { emitMainProcessError } from 'backend/helpers';
+
+export default function registerIpcMainMessageListeners(main: Main) {
+  ipcMain.on(IPC_MESSAGES.OPEN_MENU, (event) => {
+    if (event.sender === null) {
+      return;
+    }
+
+    const menu = Menu.getApplicationMenu();
+    if (menu === null) {
+      return;
+    }
+
+    menu.popup({ window: main.mainWindow! });
+  });
+
+  ipcMain.on(IPC_MESSAGES.RELOAD_MAIN_WINDOW, () => {
+    main.mainWindow!.reload();
+  });
+
+  ipcMain.on(IPC_MESSAGES.MINIMIZE_MAIN_WINDOW, () => {
+    main.mainWindow!.minimize();
+  });
+
+  ipcMain.on(IPC_MESSAGES.MAXIMIZE_MAIN_WINDOW, () => {
+    main.mainWindow!.isMaximized()
+      ? main.mainWindow!.unmaximize()
+      : main.mainWindow!.maximize();
+  });
+
+  ipcMain.on(IPC_MESSAGES.ISMAXIMIZED_MAIN_WINDOW, (event) => {
+    const isMaximized = main.mainWindow?.isMaximized() ?? false;
+    event.sender.send(IPC_MESSAGES.ISMAXIMIZED_RESULT, isMaximized);
+  });
+
+  ipcMain.on(IPC_MESSAGES.ISFULLSCREEN_MAIN_WINDOW, (event) => {
+    const isFullscreen = main.mainWindow?.isFullScreen() ?? false;
+    event.sender.send(IPC_MESSAGES.ISFULLSCREEN_RESULT, isFullscreen);
+  });
+
+  ipcMain.on(IPC_MESSAGES.CLOSE_MAIN_WINDOW, () => {
+    main.mainWindow!.close();
+  });
+
+  ipcMain.on(IPC_MESSAGES.OPEN_EXTERNAL, (_, link: string) => {
+    shell.openExternal(link).catch((err) => emitMainProcessError(err));
+  });
+
+  ipcMain.on(IPC_MESSAGES.SHOW_ITEM_IN_FOLDER, (_, filePath: string) => {
+    return shell.showItemInFolder(filePath);
+  });
+}
+
+======================================================================
+FILE: main\registerProcessListeners.ts
+======================================================================
+import { app } from 'electron';
+import { CUSTOM_EVENTS, IPC_CHANNELS } from 'utils/messages';
+import { Main } from '../main';
+
+export default function registerProcessListeners(main: Main) {
+  if (main.isDevelopment) {
+    if (process.platform === 'win32') {
+      process.on('message', (data) => {
+        if (data === 'graceful-exit') {
+          app.quit();
+        }
+      });
+    } else {
+      process.on('SIGTERM', () => {
+        app.quit();
+      });
+    }
+  }
+
+  process.on(CUSTOM_EVENTS.MAIN_PROCESS_ERROR, (error, more) => {
+    main.mainWindow!.webContents.send(
+      IPC_CHANNELS.LOG_MAIN_PROCESS_ERROR,
+      error,
+      more
+    );
+  });
+
+  process.on('unhandledRejection', (error) => {
+    main.mainWindow!.webContents.send(
+      IPC_CHANNELS.LOG_MAIN_PROCESS_ERROR,
+      error
+    );
+  });
+
+  process.on('uncaughtException', (error) => {
+    main.mainWindow!.webContents.send(
+      IPC_CHANNELS.LOG_MAIN_PROCESS_ERROR,
+      error
+    );
+    setTimeout(() => process.exit(1), 10000);
+  });
+}
+
+======================================================================
+FILE: main\saveHtmlAsPdf.ts
+======================================================================
+import { App, BrowserWindow } from 'electron';
+import fs from 'fs/promises';
+import path from 'path';
+
+export async function saveHtmlAsPdf(
+  html: string,
+  savePath: string,
+  app: App,
+  width: number, // centimeters
+  height: number // centimeters
+): Promise<boolean> {
+  /**
+   * Store received html as a file in a tempdir,
+   * this will be loaded into the print view
+   */
+  const tempRoot = app.getPath('temp');
+  const filename = path.parse(savePath).name;
+  const htmlPath = path.join(tempRoot, `${filename}.html`);
+  await fs.writeFile(htmlPath, html, { encoding: 'utf-8' });
+
+  const effectiveWidth = width > 0 ? width : 21;
+  const effectiveHeight = height > 0 ? height : 29.7;
+
+  const printWindow = await getInitializedPrintWindow(htmlPath, effectiveWidth, effectiveHeight);
+  const printOptions: any = {
+    margins: { top: 0, bottom: 0, left: 0, right: 0 },
+    pageSize:
+      width > 0 && height > 0
+        ? {
+            height: height / 2.54,
+            width: width / 2.54,
+          }
+        : 'A4',
+    printBackground: true,
+  };
+
+  const data = await printWindow.webContents.printToPDF(printOptions);
+  await fs.writeFile(savePath, data);
+  printWindow.close();
+  await fs.unlink(htmlPath);
+  return true;
+}
+
+export async function getInitializedPrintWindow(
+  printFilePath: string,
+  width: number,
+  height: number
+) {
+  const winWidth = width > 0 ? width : 21;
+  const winHeight = height > 0 ? height : 29.7;
+
+  const printWindow = new BrowserWindow({
+    width: Math.floor(winWidth * 28.333333), // pixels
+    height: Math.floor(winHeight * 28.333333), // pixels
+    show: false,
+  });
+
+  await printWindow.loadFile(printFilePath);
+  return printWindow;
+}
+

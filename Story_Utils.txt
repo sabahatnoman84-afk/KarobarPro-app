@@ -1,0 +1,6807 @@
+﻿
+======================================================================
+FILE: src\utils\api.ts
+======================================================================
+export async function sendAPIRequest(
+  endpoint: string,
+  options: RequestInit | undefined
+) {
+  return await ipc.sendAPIRequest(endpoint, options);
+}
+
+======================================================================
+FILE: src\utils\chart.ts
+======================================================================
+import { DateTime } from 'luxon';
+
+export function prefixFormat(value: number): string {
+  /*
+  1,000000,000,000,000,000 = 1 P (Pentillion)
+      1000,000,000,000,000 = 1 Q (Quadrillion)
+          1000,000,000,000 = 1 T (Trillion)
+              1000,000,000 = 1 B (Billion)
+                  1000,000 = 1 M (Million)
+                      1000 = 1 K (Thousand)
+                         1 = 1
+  */
+  if (Math.abs(value) < 1) {
+    return Math.round(value).toString();
+  }
+
+  const ten = Math.floor(Math.log10(Math.abs(value)));
+  const three = Math.floor(ten / 3);
+  const num = Math.round(value / Math.pow(10, three * 3));
+  const suffix = ['', 'K', 'M', 'B', 'T', 'Q', 'P'][three];
+  return `${num} ${suffix}`;
+}
+
+export function euclideanDistance(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): number {
+  const dsq = Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2);
+  return Math.sqrt(dsq);
+}
+
+function getRoundingConst(val: number): number {
+  const pow = Math.max(Math.log10(Math.abs(val)) - 1, 0);
+  return 10 ** Math.floor(pow);
+}
+
+function getVal(minOrMaxVal: number): number {
+  const rc = getRoundingConst(minOrMaxVal);
+  const sign = minOrMaxVal >= 0 ? 1 : -1;
+  if (sign === 1) {
+    return Math.ceil(minOrMaxVal / rc) * rc;
+  }
+  return Math.floor(minOrMaxVal / rc) * rc;
+}
+
+export function getYMax(points: number[][]): number {
+  const maxVal = Math.max(...points.flat());
+  if (maxVal === 0) {
+    return 0;
+  }
+
+  return getVal(maxVal);
+}
+
+export function getYMin(points: number[][]): number {
+  const minVal = Math.min(...points.flat());
+  if (minVal === 0) {
+    return minVal;
+  }
+
+  return getVal(minVal);
+}
+
+export function formatXLabels(label: string) {
+  return DateTime.fromISO(label).toFormat('MMM yy');
+}
+
+======================================================================
+FILE: src\utils\colors.ts
+======================================================================
+import colors from '../../colors.json';
+
+export const uicolors = colors;
+export const indicators = {
+  GRAY: 'grey',
+  GREY: 'grey',
+  BLUE: 'blue',
+  RED: 'red',
+  GREEN: 'green',
+  ORANGE: 'orange',
+  PURPLE: 'purple',
+  YELLOW: 'yellow',
+  BLACK: 'black',
+};
+
+const getValidColor = (color: string) => {
+  const isValid = [
+    'gray',
+    'orange',
+    'green',
+    'red',
+    'yellow',
+    'blue',
+    'indigo',
+    'pink',
+    'purple',
+    'teal',
+  ].includes(color);
+  return isValid ? color : 'gray';
+};
+
+export function getBgColorClass(color: string) {
+  const vcolor = getValidColor(color);
+  return `bg-${vcolor}-200 dark:bg-${vcolor}-800`;
+}
+
+export function getColorClass(
+  color: string,
+  type: 'bg' | 'text' | 'border',
+  value = 300,
+  darkvalue = 600
+) {
+  return `${type}-${getValidColor(color)}-${value} dark:${type}-${getValidColor(
+    color
+  )}-${darkvalue}`;
+}
+
+export function getTextColorClass(color: string) {
+  return `text-${getValidColor(color)}-700 dark:text-${getValidColor(
+    color
+  )}-200`;
+}
+
+export function getBgTextColorClass(color: string) {
+  const bg = getBgColorClass(color);
+  const text = getTextColorClass(color);
+  return [bg, text].join(' ');
+}
+
+======================================================================
+FILE: src\utils\db.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+
+type Conn = {
+  countryCode: string;
+  error?: Error;
+  actionSymbol?: typeof dbErrorActionSymbols[keyof typeof dbErrorActionSymbols];
+};
+
+export const dbErrorActionSymbols = {
+  SelectFile: Symbol('select-file'),
+  CancelSelection: Symbol('cancel-selection'),
+} as const;
+
+const dbErrors = {
+  DirectoryDoesNotExist: 'directory does not exist',
+  UnableToAcquireConnection: 'Unable to acquire a connection',
+} as const;
+
+export async function connectToDatabase(
+  fyo: Fyo,
+  dbPath: string,
+  countryCode?: string
+): Promise<Conn> {
+  try {
+    return { countryCode: await fyo.db.connectToDatabase(dbPath, countryCode) };
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      throw error;
+    }
+
+    return {
+      countryCode: '',
+      error,
+      actionSymbol: await handleDatabaseConnectionError(error, dbPath),
+    };
+  }
+}
+
+export async function handleDatabaseConnectionError(
+  error: Error,
+  dbPath: string
+) {
+  const message = error.message;
+  if (typeof message !== 'string') {
+    throw error;
+  }
+
+  if (message.includes(dbErrors.DirectoryDoesNotExist)) {
+    return await handleDirectoryDoesNotExist(dbPath);
+  }
+
+  if (message.includes(dbErrors.UnableToAcquireConnection)) {
+    return await handleUnableToAcquireConnection(dbPath);
+  }
+
+  throw error;
+}
+
+async function handleUnableToAcquireConnection(dbPath: string) {
+  return await showDbErrorDialog(
+    t`Could not connect to database file ${dbPath}, please select the file manually`
+  );
+}
+
+async function handleDirectoryDoesNotExist(dbPath: string) {
+  return await showDbErrorDialog(
+    t`Directory for database file ${dbPath} does not exist, please select the file manually`
+  );
+}
+
+async function showDbErrorDialog(detail: string) {
+  const { showDialog } = await import('src/utils/interactive');
+  return showDialog({
+    type: 'error',
+    title: t`Cannot Open File`,
+    detail,
+    buttons: [
+      {
+        label: t`Select File`,
+        action() {
+          return dbErrorActionSymbols.SelectFile;
+        },
+        isPrimary: true,
+      },
+      {
+        label: t`Cancel`,
+        action() {
+          return dbErrorActionSymbols.CancelSelection;
+        },
+        isEscape: true,
+      },
+    ],
+  });
+}
+
+======================================================================
+FILE: src\utils\doc.ts
+======================================================================
+import { Doc } from 'fyo/model/doc';
+import { DynamicLinkField, Field, TargetField } from 'schemas/types';
+import { GetAllOptions } from 'utils/db/types';
+
+export function evaluateReadOnly(field: Field, doc?: Doc) {
+  if (doc?.inserted && field.fieldname === 'numberSeries') {
+    return true;
+  }
+
+  if (
+    field.fieldname === 'name' &&
+    (doc?.inserted || doc?.schema.naming !== 'manual')
+  ) {
+    return true;
+  }
+
+  if (doc?.isSubmitted || doc?.parentdoc?.isSubmitted) {
+    return true;
+  }
+
+  if (doc?.isCancelled || doc?.parentdoc?.isCancelled) {
+    return true;
+  }
+
+  return evaluateFieldMeta(field, doc, 'readOnly');
+}
+
+export function evaluateHidden(field: Field, doc?: Doc) {
+  return evaluateFieldMeta(field, doc, 'hidden');
+}
+
+export function evaluateInvisible(field: Field, doc?: Doc) {
+  return evaluateFieldMeta(field, doc, 'invisible');
+}
+
+export function evaluateRequired(field: Field, doc?: Doc) {
+  return evaluateFieldMeta(field, doc, 'required');
+}
+
+function evaluateFieldMeta(
+  field: Field,
+  doc?: Doc,
+  meta?: 'required' | 'hidden' | 'invisible' | 'readOnly',
+  defaultValue = false
+) {
+  if (meta === undefined) {
+    return defaultValue;
+  }
+
+  const value = field[meta];
+  if (value !== undefined) {
+    return value;
+  }
+
+  const docRecord = doc as Record<string, unknown> | undefined;
+  const metaKey = meta as string;
+  const metaObj = docRecord?.[metaKey] as
+    | Record<string, (() => boolean) | undefined>
+    | undefined;
+  const evalFunction = metaObj?.[field.fieldname];
+  if (typeof evalFunction === 'function') {
+    return evalFunction();
+  }
+
+  return defaultValue;
+}
+
+export async function getLinkedEntries(
+  doc: Doc
+): Promise<Record<string, string[]>> {
+  // TODO: Normalize this function.
+  const fyo = doc.fyo;
+  const target = doc.schemaName;
+
+  const linkingFields = Object.values(fyo.schemaMap)
+    .filter((sch) => !sch?.isSingle)
+    .map((sch) => sch?.fields)
+    .flat()
+    .filter(
+      (f) => f?.fieldtype === 'Link' && f.target === target
+    ) as TargetField[];
+
+  const dynamicLinkingFields = Object.values(fyo.schemaMap)
+    .filter((sch) => !sch?.isSingle)
+    .map((sch) => sch?.fields)
+    .flat()
+    .filter((f) => f?.fieldtype === 'DynamicLink') as DynamicLinkField[];
+
+  type Detail = { name: string; created: string };
+  type ChildEntryDetail = {
+    name: string;
+    parent: string;
+    parentSchemaName: string;
+  };
+  const entries: Record<string, Detail[]> = {};
+  const childEntries: Record<string, ChildEntryDetail[]> = {};
+
+  for (const field of [linkingFields, dynamicLinkingFields].flat()) {
+    if (!field.schemaName) {
+      continue;
+    }
+
+    const options: GetAllOptions = {
+      filters: { [field.fieldname]: doc.name! },
+      fields: ['name'],
+    };
+
+    if (field.fieldtype === 'DynamicLink') {
+      options.filters![field.references] = doc.schemaName!;
+    }
+
+    const schema = fyo.schemaMap[field.schemaName];
+    if (schema?.isChild) {
+      options.fields!.push('parent', 'parentSchemaName');
+    } else {
+      options.fields?.push('created');
+    }
+
+    if (schema?.isSubmittable) {
+      options.filters!.cancelled = false;
+    }
+
+    const details = (await fyo.db.getAllRaw(field.schemaName, options)) as
+      | Detail[]
+      | ChildEntryDetail[];
+
+    if (!details.length) {
+      continue;
+    }
+
+    for (const d of details) {
+      if ('parent' in d) {
+        childEntries[field.schemaName] ??= [];
+        childEntries[field.schemaName]!.push(d);
+      } else {
+        entries[field.schemaName] ??= [];
+        entries[field.schemaName].push(d);
+      }
+    }
+  }
+
+  const parents = Object.values(childEntries)
+    .flat()
+    .map((c) => `${c.parentSchemaName}.${c.parent}`);
+  const parentsSet = new Set(parents);
+  for (const p of parentsSet) {
+    const i = p.indexOf('.');
+    const schemaName = p.slice(0, i);
+    const name = p.slice(i + 1);
+
+    const details = (await fyo.db.getAllRaw(schemaName, {
+      filters: { name },
+      fields: ['name', 'created'],
+    })) as Detail[];
+
+    entries[schemaName] ??= [];
+    entries[schemaName].push(...details);
+  }
+
+  const entryMap: Record<string, string[]> = {};
+  for (const schemaName in entries) {
+    entryMap[schemaName] = entries[schemaName]
+      .map((e) => ({ name: e.name, created: new Date(e.created) }))
+      .sort((a, b) => b.created.valueOf() - a.created.valueOf())
+      .map((e) => e.name);
+  }
+
+  return entryMap;
+}
+
+======================================================================
+FILE: src\utils\erpnextSync.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { sendAPIRequest } from './api';
+import { ModelNameEnum } from 'models/types';
+import { ERPNextSyncSettings } from 'models/baseModels/ERPNextSyncSettings/ERPNextSyncSettings';
+import { DocValueMap } from 'fyo/core/types';
+import { Doc } from 'fyo/model/doc';
+import { ERPNextSyncQueue } from 'models/baseModels/ERPNextSyncQueue/ERPNextSyncQueue';
+import { SalesInvoice } from 'models/baseModels/SalesInvoice/SalesInvoice';
+import { StockMovementItem } from 'models/inventory/StockMovementItem';
+import { getRandomString } from '../../utils';
+import { ValidationError } from 'fyo/utils/errors';
+import { PricingRule } from 'models/baseModels/PricingRule/PricingRule';
+import { PricingRuleItem } from 'models/baseModels/PricingRuleItem/PricingRuleItem';
+
+export async function registerInstanceToERPNext(fyo: Fyo) {
+  if (!navigator.onLine) {
+    const errorMsg = 'No internet connection available';
+    throw new Error(errorMsg);
+  }
+
+  const syncSettingsDoc = (await fyo.doc.getDoc(
+    ModelNameEnum.ERPNextSyncSettings
+  )) as ERPNextSyncSettings;
+
+  const baseURL = syncSettingsDoc.baseURL;
+  const token = syncSettingsDoc.authToken;
+  let deviceID = syncSettingsDoc.deviceID;
+  const instanceName = syncSettingsDoc.instanceName;
+
+  if (!baseURL || !token) {
+    const errorMsg = 'Missing baseURL or authToken for ERPNext registration';
+    throw new ValidationError(errorMsg);
+  }
+
+  if (!deviceID) {
+    await syncSettingsDoc.setAndSync('deviceID', getRandomString());
+  }
+
+  deviceID = syncSettingsDoc.deviceID;
+  const registerInstance = fyo.singles.ERPNextSyncSettings
+    ?.registerInstance as string;
+
+  const response = (await sendAPIRequest(
+    `${baseURL}/api/method/books_integration.api.${registerInstance}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        instance: deviceID,
+        instance_name: instanceName,
+      }),
+    }
+  )) as unknown as ERPNextSyncSettingsAPIResponse;
+
+  if (!response.message.success) {
+    const errorMsg =
+      response.message.message || 'Failed to register instance to ERPNext';
+    throw new ValidationError(errorMsg);
+  }
+}
+
+export async function updateERPNSyncSettings(fyo: Fyo) {
+  if (!navigator.onLine) {
+    const errorMsg = 'No internet connection available';
+    throw new Error(errorMsg);
+  }
+
+  const syncSettingsDoc = (await fyo.doc.getDoc(
+    ModelNameEnum.ERPNextSyncSettings
+  )) as ERPNextSyncSettings;
+
+  const baseURL = syncSettingsDoc.baseURL;
+  const authToken = syncSettingsDoc.authToken;
+  const deviceID = syncSettingsDoc.deviceID;
+
+  if (!baseURL || !authToken || !deviceID) {
+    const errorMsg =
+      'Missing baseURL, authToken, or deviceID for ERPNext sync settings update';
+    throw new ValidationError(errorMsg);
+  }
+
+  const res = await getERPNSyncSettings(fyo, baseURL, authToken);
+  if (!res || !res.message || !res.message.success) {
+    const errorMsg =
+      res?.message?.message || 'Failed to fetch sync settings from ERPNext';
+    throw new ValidationError(errorMsg);
+  }
+
+  await syncSettingsDoc.setMultiple(parseSyncSettingsData(res));
+  await syncSettingsDoc.sync();
+}
+
+async function getERPNSyncSettings(
+  fyo: Fyo,
+  baseURL: string,
+  token: string
+): Promise<ERPNextSyncSettingsAPIResponse | undefined> {
+  const syncSettings = fyo.singles.ERPNextSyncSettings?.syncSettings as string;
+
+  if (!syncSettings) {
+    const errorMsg = 'Sync settings endpoint not configured';
+    throw new ValidationError(errorMsg);
+  }
+
+  const response = (await sendAPIRequest(
+    `${baseURL}/api/method/books_integration.api.${syncSettings}`,
+    {
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  )) as unknown as ERPNextSyncSettingsAPIResponse;
+
+  return response;
+}
+
+export async function initERPNSync(fyo: Fyo) {
+  const isSyncEnabled = fyo.singles.ERPNextSyncSettings?.isEnabled;
+  const initialSyncData =
+    fyo.singles.ERPNextSyncSettings?.initialSyncData ?? true;
+  if (!isSyncEnabled) {
+    const errorMsg = 'ERPNext sync is not enabled';
+    throw new Error(errorMsg);
+  }
+
+  if (!initialSyncData) {
+    await performInitialFullSync(fyo);
+  } else {
+    let lastError: Error | null = null;
+
+    for (let i = 0; i < 3; i++) {
+      try {
+        await syncDocumentsFromERPNext(fyo, false);
+        lastError = null;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+  }
+}
+
+export async function syncDocumentsFromERPNext(fyo: Fyo, shouldThrow = false) {
+  const isEnabled = fyo.singles.ERPNextSyncSettings?.isEnabled;
+  if (!isEnabled) {
+    const errorMsg = 'ERPNext sync is not enabled';
+    throw new Error(errorMsg);
+  }
+
+  const token = fyo.singles.ERPNextSyncSettings?.authToken as string;
+  const baseURL = fyo.singles.ERPNextSyncSettings?.baseURL as string;
+  const deviceID = fyo.singles.ERPNextSyncSettings?.deviceID as string;
+
+  if (!token || !baseURL) {
+    const errorMsg = 'Missing token or baseURL for ERPNext sync';
+    const error = new ValidationError(errorMsg);
+    if (shouldThrow) {
+      throw error;
+    }
+    return;
+  }
+
+  const docsToSync = await getDocsFromERPNext(fyo, baseURL, token, deviceID);
+  if (!docsToSync?.message.success) {
+    const errorMsg =
+      docsToSync?.message.message || 'Failed to fetch documents from ERPNext';
+    if (shouldThrow) {
+      throw new ValidationError(errorMsg);
+    }
+    return;
+  }
+
+  if (!docsToSync || !docsToSync.message.success || !docsToSync.message.data) {
+    return;
+  }
+
+  const failedDocs: string[] = [];
+
+  for (let doc of docsToSync.message.data.reverse()) {
+    if (!isValidSyncableDocName(doc.doctype as string)) {
+      continue;
+    }
+    if (!(getDocTypeName(doc) in ModelNameEnum)) {
+      continue;
+    }
+
+    const docName = (doc.fbooksDocName || doc.name) as string;
+    if (getDocTypeName(doc) === ModelNameEnum.Item) {
+      doc.datafromErp = true;
+    }
+
+    try {
+      if ((doc.fbooksDocName as string) || (doc.name as string)) {
+        const isDocExists = await fyo.db.exists(
+          getDocTypeName(doc),
+          (doc.fbooksDocName as string) || (doc.name as string)
+        );
+
+        if (isDocExists) {
+          const existingDoc = await fyo.doc.getDoc(
+            getDocTypeName(doc),
+            (doc.fbooksDocName as string) || (doc.name as string)
+          );
+
+          doc.name = doc.fbooksDocName ?? doc.name;
+          doc = checkDocDataTypes(fyo, doc) as DocValueMap;
+
+          await existingDoc.setMultiple(doc);
+          await performPreSync(fyo, doc);
+          await appendDocValues(existingDoc as DocValueMap, doc);
+          existingDoc._addDocToSyncQueue = false;
+
+          await existingDoc.sync();
+
+          if (doc.submitted) {
+            await existingDoc.submit();
+          }
+
+          if (doc.cancelled) {
+            await existingDoc.cancel();
+          }
+
+          await afterDocSync(
+            fyo,
+            baseURL,
+            token,
+            deviceID,
+            doc,
+            (doc.erpnextDocName as string) || (doc.name as string),
+            doc.name as string
+          );
+          continue;
+        }
+      }
+
+      const newDoc = fyo.doc.getNewDoc(getDocTypeName(doc), doc);
+
+      await performPreSync(fyo, doc);
+      await appendDocValues(newDoc as DocValueMap, doc);
+      newDoc._addDocToSyncQueue = false;
+
+      await newDoc.sync();
+
+      if (doc.submitted) {
+        await newDoc.submit();
+      }
+
+      if (doc.cancelled) {
+        await newDoc.cancel();
+      }
+
+      await afterDocSync(
+        fyo,
+        baseURL,
+        token,
+        deviceID,
+        doc,
+        (doc.erpnextDocName as string) || (doc.name as string),
+        newDoc.name as string
+      );
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      failedDocs.push(`${docName}: ${errorMsg}`);
+
+      if (shouldThrow) {
+        throw error;
+      }
+    }
+  }
+}
+async function createNewDocument(
+  fyo: Fyo,
+  doc: DocValueMap,
+  baseURL: string,
+  token: string,
+  deviceID: string
+) {
+  if (getDocTypeName(doc) === ModelNameEnum.Item) {
+    doc.datafromErp = true;
+  }
+
+  const newDoc = fyo.doc.getNewDoc(getDocTypeName(doc), doc);
+  await performPreSync(fyo, doc);
+  await appendDocValues(newDoc as DocValueMap, doc);
+  newDoc._addDocToSyncQueue = false;
+  await newDoc.sync();
+
+  if (doc.submitted) {
+    await newDoc.submit();
+  }
+  if (doc.cancelled) {
+    await newDoc.cancel();
+  }
+
+  await afterDocSync(
+    fyo,
+    baseURL,
+    token,
+    deviceID,
+    doc,
+    (doc.erpnextDocName as string) || (doc.name as string),
+    newDoc.name as string
+  );
+}
+
+async function appendDocValues(newDoc: DocValueMap, doc: DocValueMap) {
+  switch (doc.doctype) {
+    case ModelNameEnum.Item:
+      if (!doc.uomConversions || !Array.isArray(doc.uomConversions)) {
+        break;
+      }
+
+      for (const uomDoc of doc.uomConversions as DocValueMap[]) {
+        if (!uomDoc.uom || !uomDoc.conversionFactor) {
+          throw new ValidationError(
+            `Invalid UOM conversion data: missing uom or conversionFactor`
+          );
+        }
+        await (newDoc as Doc).append('uomConversions', {
+          uom: uomDoc.uom,
+          conversionFactor: uomDoc.conversionFactor,
+        });
+      }
+      break;
+
+    case ModelNameEnum.PriceList:
+      (newDoc as Doc).priceListItem = [];
+      const uniqueKeys = new Set<string>();
+
+      if (doc.priceListItem && Array.isArray(doc.priceListItem)) {
+        for (const row of doc.priceListItem as DocValueMap[]) {
+          const itemValue = row.item;
+          const unitValue = row.unit;
+
+          if (itemValue == null || unitValue == null) {
+            throw new ValidationError(
+              `Price list item missing required fields: item or unit`
+            );
+          }
+          const key = `${String(itemValue)}::${String(unitValue)}`;
+          if (uniqueKeys.has(key)) {
+            continue;
+          }
+          uniqueKeys.add(key);
+          await (newDoc as Doc).append('priceListItem', row);
+        }
+      }
+      break;
+
+    case ModelNameEnum.PricingRule:
+      const itemSet = new Set<string>();
+
+      (newDoc as Doc).appliedItems = (
+        newDoc as PricingRule
+      ).appliedItems?.filter((row: PricingRuleItem) => {
+        const key = `${row.item as string}::${row.unit as string}`;
+
+        if (itemSet.has(key)) {
+          return false;
+        }
+
+        itemSet.add(key);
+        return true;
+      });
+
+      const docItemSet = new Set<string>(
+        (doc as PricingRule).appliedItems?.map(
+          (row: PricingRuleItem) =>
+            `${row.item as string}::${row.unit as string}`
+        ) || []
+      );
+
+      (newDoc as PricingRule).appliedItems = (
+        newDoc as PricingRule
+      ).appliedItems?.filter((row: PricingRuleItem) =>
+        docItemSet.has(`${row.item as string}::${row.unit as string}`)
+      );
+      break;
+  }
+}
+
+async function performPreSync(fyo: Fyo, doc: DocValueMap) {
+  const initialSyncData =
+    fyo.singles.ERPNextSyncSettings?.initialSyncData ?? true;
+  const isInitialSync = !initialSyncData;
+  switch (doc.doctype) {
+    case ModelNameEnum.Item:
+      if (!doc.unit) {
+        throw new ValidationError(`Item missing required field: unit`);
+      }
+
+      const isUnitExists = await fyo.db.exists(
+        ModelNameEnum.UOM,
+        doc.unit as string
+      );
+
+      const isUnitExistsInQueue = (
+        await fyo.db.getAll(ModelNameEnum.FetchFromERPNextQueue, {
+          filters: {
+            referenceType: ModelNameEnum.UOM,
+            documentName: doc.unit as string,
+          },
+        })
+      ).length;
+
+      if (!isUnitExists && !isUnitExistsInQueue) {
+        await addToFetchFromERPNextQueue(fyo, {
+          referenceType: ModelNameEnum.UOM,
+          documentName: doc.unit,
+        });
+      }
+      if (doc.itemGroup) {
+        const isItemGroupExists = await fyo.db.exists(
+          ModelNameEnum.ItemGroup,
+          doc.itemGroup as string
+        );
+
+        if (!isItemGroupExists) {
+          if (isInitialSync) {
+            const itemGroupData = {
+              name: doc.itemGroup,
+            };
+
+            const itemGroupDoc = fyo.doc.getNewDoc(
+              ModelNameEnum.ItemGroup,
+              itemGroupData
+            );
+            itemGroupDoc._addDocToSyncQueue = false;
+            await itemGroupDoc.sync();
+          } else {
+            await addToFetchFromERPNextQueue(fyo, {
+              referenceType: ModelNameEnum.ItemGroup,
+              documentName: doc.itemGroup,
+            });
+          }
+        }
+      }
+
+      if (doc.uomConversions) {
+        for (const row of doc.uomConversions as DocValueMap[]) {
+          if (!row.uom) {
+            throw new ValidationError(
+              `UOM conversion missing required field: uom`
+            );
+          }
+
+          const isUnitExists = await fyo.db.exists(
+            ModelNameEnum.UOM,
+            row.uom as string
+          );
+
+          if (!isUnitExists) {
+            const data = {
+              name: row.uom,
+              isWhole: row.isWhole,
+            };
+
+            await fyo.doc.getNewDoc(ModelNameEnum.UOM, data).sync();
+          }
+        }
+      }
+      return;
+
+    case 'Customer':
+    case 'Supplier':
+      const isAddressExists = await fyo.db.exists(
+        ModelNameEnum.Address,
+        doc.address as string
+      );
+
+      if (!isAddressExists) {
+        await addToFetchFromERPNextQueue(fyo, {
+          referenceType: ModelNameEnum.Address,
+          documentName: doc.address,
+        });
+      }
+
+      return;
+
+    case ModelNameEnum.SalesInvoice:
+      return await preSyncSalesInvoice(fyo, doc as SalesInvoice);
+
+    case ModelNameEnum.StockMovement:
+      if (!doc || !doc.items) {
+        return;
+      }
+
+      for (const item of doc.items as StockMovementItem[]) {
+        const isItemExists = await fyo.db.exists(ModelNameEnum.Item, item.item);
+
+        if (!isItemExists) {
+          await addToFetchFromERPNextQueue(fyo, {
+            referenceType: ModelNameEnum.Item,
+            documentName: item.item,
+          });
+        }
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+async function updateExistingDocument(
+  fyo: Fyo,
+  doc: DocValueMap,
+  baseURL: string,
+  token: string,
+  deviceID: string
+) {
+  const docType = getDocTypeName(doc);
+
+  const existingDoc = await fyo.doc.getDoc(
+    docType,
+    (doc.fbooksDocName as string) || (doc.name as string)
+  );
+
+  doc.name = doc.fbooksDocName ?? doc.name;
+  doc = checkDocDataTypes(fyo, doc) as DocValueMap;
+
+  await existingDoc.setMultiple(doc);
+  await performPreSync(fyo, doc);
+  await appendDocValues(existingDoc as DocValueMap, doc);
+  existingDoc._addDocToSyncQueue = false;
+
+  await existingDoc.sync();
+
+  if (doc.submitted) {
+    await existingDoc.submit();
+  }
+
+  if (doc.cancelled) {
+    await existingDoc.cancel();
+  }
+
+  await afterDocSync(
+    fyo,
+    baseURL,
+    token,
+    deviceID,
+    doc,
+    (doc.erpnextDocName as string) || (doc.name as string),
+    doc.name as string
+  );
+}
+
+export async function performInitialFullSync(fyo: Fyo) {
+  const isEnabled = fyo.singles.ERPNextSyncSettings?.isEnabled;
+  const initialSyncData =
+    fyo.singles.ERPNextSyncSettings?.initialSyncData ?? true;
+
+  if (!isEnabled) {
+    const errorMsg = 'ERPNext sync is not enabled';
+    throw new Error(errorMsg);
+  }
+
+  if (initialSyncData) {
+    return;
+  }
+
+  const token = fyo.singles.ERPNextSyncSettings?.authToken as string;
+  const baseURL = fyo.singles.ERPNextSyncSettings?.baseURL as string;
+  const deviceID = fyo.singles.ERPNextSyncSettings?.deviceID as string;
+
+  if (!token || !baseURL) {
+    const errorMsg = 'Missing token or baseURL for initial sync';
+    throw new ValidationError(errorMsg);
+  }
+
+  const allDocs = await getAllDocsForInitialSync(fyo, baseURL, token, deviceID);
+
+  if (!allDocs || allDocs.length === 0) {
+    const syncSettingsDoc = (await fyo.doc.getDoc(
+      ModelNameEnum.ERPNextSyncSettings
+    )) as ERPNextSyncSettings;
+    await syncSettingsDoc.setAndSync('initialSyncData', true);
+    return;
+  }
+
+  const processOrder = [
+    ModelNameEnum.UOM,
+    ModelNameEnum.ItemGroup,
+    ModelNameEnum.Party,
+    ModelNameEnum.Address,
+    ModelNameEnum.Item,
+    ModelNameEnum.PriceList,
+    ModelNameEnum.PricingRule,
+    ModelNameEnum.Batch,
+  ];
+
+  const docsByType: Record<string, DocValueMap[]> = {};
+  for (const doc of allDocs) {
+    const docType = getDocTypeName(doc);
+    if (!docsByType[docType]) {
+      docsByType[docType] = [];
+    }
+    docsByType[docType].push(doc);
+  }
+
+  const failedDocs: string[] = [];
+
+  for (const docType of processOrder) {
+    if (docsByType[docType] && docsByType[docType].length > 0) {
+      for (const doc of docsByType[docType]) {
+        const docName = (doc.fbooksDocName as string) || (doc.name as string);
+        try {
+          if (docType === ModelNameEnum.Item) {
+            doc.datafromErp = true;
+          }
+
+          const isDocExists = await fyo.db.exists(
+            docType,
+            (doc.fbooksDocName as string) || (doc.name as string)
+          );
+
+          if (isDocExists) {
+            await updateExistingDocument(fyo, doc, baseURL, token, deviceID);
+          } else {
+            await createNewDocument(fyo, doc, baseURL, token, deviceID);
+          }
+        } catch (error) {
+          const errorMsg =
+            error instanceof Error ? error.message : String(error);
+          failedDocs.push(`${docName} (${docType}): ${errorMsg}`);
+
+          const fullErrorMsg = `Failed to process document ${String(
+            doc.name ?? doc.fbooksDocName
+          )} of type ${docType}: ${errorMsg}`;
+          throw new Error(fullErrorMsg);
+        }
+      }
+    }
+  }
+
+  const syncSettingsDoc = (await fyo.doc.getDoc(
+    ModelNameEnum.ERPNextSyncSettings
+  )) as ERPNextSyncSettings;
+
+  await syncSettingsDoc.setAndSync('initialSyncData', true);
+}
+
+async function getAllDocsForInitialSync(
+  fyo: Fyo,
+  baseURL: string,
+  token: string,
+  deviceID: string
+): Promise<DocValueMap[]> {
+  const fetchFromERPNextQueue = fyo.singles.ERPNextSyncSettings
+    ?.fetchFromERPNextQueue as string;
+
+  if (!fetchFromERPNextQueue) {
+    const errorMsg = 'Fetch from ERPNext queue endpoint not configured';
+    throw new ValidationError(errorMsg);
+  }
+
+  const url = `${baseURL}/api/method/books_integration.api.${fetchFromERPNextQueue}?instance=${deviceID}&all_docs=true`;
+
+  const response = (await sendAPIRequest(url, {
+    headers: {
+      Authorization: `token ${token}`,
+      'Content-Type': 'application/json',
+    },
+  })) as unknown as ERPNSyncDocsResponse;
+
+  if (!response?.message?.success || !response.message.data) {
+    const errorMsg =
+      response?.message?.message ||
+      'Failed to fetch documents for initial sync';
+    throw new ValidationError(errorMsg);
+  }
+  return response.message.data;
+}
+
+async function preSyncSalesInvoice(fyo: Fyo, doc: SalesInvoice) {
+  if (!doc.party) {
+    throw new ValidationError(`Sales invoice missing required field: party`);
+  }
+
+  const isPartyExists = await fyo.db.exists(ModelNameEnum.Party, doc.party);
+
+  if (!isPartyExists) {
+    await addToFetchFromERPNextQueue(fyo, {
+      referenceType: ModelNameEnum.Party,
+      documentName: doc.party,
+    });
+  }
+
+  if (doc.items) {
+    for (const item of doc.items) {
+      if (!item.unit) {
+        throw new ValidationError(
+          `Sales invoice item missing required field: unit`
+        );
+      }
+      if (!item.item) {
+        throw new ValidationError(
+          `Sales invoice item missing required field: item`
+        );
+      }
+
+      const isUnitExists = await fyo.db.exists(ModelNameEnum.UOM, item.unit);
+      if (!isUnitExists) {
+        await addToFetchFromERPNextQueue(fyo, {
+          referenceType: ModelNameEnum.UOM,
+          documentName: item.unit,
+        });
+      }
+
+      const isItemExists = await fyo.db.exists(ModelNameEnum.Item, item.item);
+      if (!isItemExists) {
+        await addToFetchFromERPNextQueue(fyo, {
+          referenceType: ModelNameEnum.Item,
+          documentName: item.item,
+        });
+      }
+
+      if (item.batch) {
+        const isBatchExists = await fyo.db.exists(
+          ModelNameEnum.Batch,
+          item.batch
+        );
+
+        if (!isBatchExists) {
+          await addToFetchFromERPNextQueue(fyo, {
+            referenceType: ModelNameEnum.Batch,
+            documentName: item.batch,
+          });
+        }
+      }
+    }
+  }
+
+  if (doc.priceList) {
+    const isPriceListExists = await fyo.db.exists(
+      ModelNameEnum.PriceList,
+      doc.priceList
+    );
+
+    if (!isPriceListExists) {
+      await addToFetchFromERPNextQueue(fyo, {
+        referenceType: ModelNameEnum.PriceList,
+        documentName: doc.priceList,
+      });
+    }
+  }
+}
+
+async function addToFetchFromERPNextQueue(fyo: Fyo, data: DocValueMap) {
+  await fyo.doc.getNewDoc(ModelNameEnum.FetchFromERPNextQueue, data).sync();
+}
+
+export async function syncDocumentsToERPNext(fyo: Fyo) {
+  const isEnabled = fyo.singles.ERPNextSyncSettings?.isEnabled;
+  if (!isEnabled) {
+    const errorMsg = 'ERPNext sync is not enabled';
+    throw new Error(errorMsg);
+  }
+
+  const token = fyo.singles.ERPNextSyncSettings?.authToken as string;
+  const baseURL = fyo.singles.ERPNextSyncSettings?.baseURL as string;
+  const deviceID = fyo.singles.ERPNextSyncSettings?.deviceID as string;
+
+  if (!token || !baseURL) {
+    const errorMsg = 'Missing token or baseURL for ERPNext sync';
+    throw new ValidationError(errorMsg);
+  }
+
+  const docsToSync = [];
+  const syncQueueItems = (await fyo.db.getAll(ModelNameEnum.ERPNextSyncQueue, {
+    fields: ['name', 'referenceType', 'documentName'],
+    order: 'desc',
+  })) as ERPNextSyncQueue[];
+
+  if (!syncQueueItems.length) {
+    return;
+  }
+
+  for (const doc of syncQueueItems) {
+    const referenceDoc = await fyo.doc.getDoc(
+      doc.referenceType as ModelNameEnum,
+      doc.documentName
+    );
+
+    if (!referenceDoc) {
+      continue;
+    }
+
+    docsToSync.push({
+      doctype: getDocTypeName(referenceDoc),
+      ...referenceDoc.getValidDict(),
+    });
+  }
+
+  if (!docsToSync.length) {
+    return;
+  }
+
+  const syncDataToERPNext = fyo.singles.ERPNextSyncSettings?.syncDataToERPNext;
+  if (!syncDataToERPNext) {
+    const errorMsg = 'Sync data to ERPNext endpoint not configured';
+    throw new ValidationError(errorMsg);
+  }
+
+  const res = (await sendAPIRequest(
+    `${baseURL}/api/method/books_integration.api.${syncDataToERPNext}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ instance: deviceID, records: docsToSync }),
+    }
+  )) as unknown as InsertDocsAPIResponse;
+
+  if (!res.message.success) {
+    throw new Error(
+      `ERPNext API error: ${String(JSON.stringify(res.message))}`
+    );
+  }
+
+  for (const doc of syncQueueItems) {
+    const syncQueueDoc = await fyo.doc.getDoc(
+      ModelNameEnum.ERPNextSyncQueue,
+      doc.name
+    );
+
+    await syncQueueDoc.delete();
+  }
+}
+
+async function getDocsFromERPNext(
+  fyo: Fyo,
+  baseURL: string,
+  token: string,
+  deviceID: string
+): Promise<ERPNSyncDocsResponse | undefined> {
+  const fetchFromERPNextQueue =
+    fyo.singles.ERPNextSyncSettings?.fetchFromERPNextQueue;
+
+  return (await sendAPIRequest(
+    `${baseURL}/api/method/books_integration.api.${
+      fetchFromERPNextQueue as string
+    }?instance=${deviceID}`,
+    {
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  )) as unknown as ERPNSyncDocsResponse;
+}
+
+async function afterDocSync(
+  fyo: Fyo,
+  baseURL: string,
+  token: string,
+  deviceID: string,
+  doc: Doc | DocValueMap,
+  erpnDocName: string,
+  fbooksDocName: string
+) {
+  const data = {
+    doctype: getDocTypeName(doc),
+    nameInERPNext: erpnDocName,
+    nameInFBooks: fbooksDocName,
+    doc,
+  };
+
+  const clearSyncedDocsFromErpNextSyncQueue = fyo.singles.ERPNextSyncSettings
+    ?.clearSyncedDocsFromErpNextSyncQueue as string;
+
+  return await ipc.sendAPIRequest(
+    `${baseURL}/api/method/books_integration.api.${clearSyncedDocsFromErpNextSyncQueue}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `token ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        instance: deviceID,
+        data,
+      }),
+    }
+  );
+}
+
+export function getShouldDocSyncToERPNext(doc: Doc): boolean {
+  const syncableModels = [
+    ModelNameEnum.SalesInvoice,
+    ModelNameEnum.Payment,
+    ModelNameEnum.Shipment,
+    ModelNameEnum.POSOpeningShift,
+    ModelNameEnum.POSClosingShift,
+  ] as string[];
+
+  if (syncableModels.includes(doc.schemaName)) {
+    return true;
+  }
+
+  return false;
+}
+
+function changeDocDataType(
+  fyo: Fyo,
+  doc: DocValueMap | Doc,
+  fields: string[],
+  type: string
+): DocValueMap | Doc {
+  const updatedDoc = { ...doc };
+
+  for (const field of fields) {
+    if (field in updatedDoc) {
+      switch (type) {
+        case ModelNameEnum.Currency:
+          updatedDoc[field] = fyo.pesa(updatedDoc[field] as number);
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  return updatedDoc as DocValueMap;
+}
+
+function checkDocDataTypes(
+  fyo: Fyo,
+  doc: DocValueMap | Doc
+): DocValueMap | Doc {
+  switch (doc.doctype) {
+    case ModelNameEnum.Item: {
+      const fields = ['rate'];
+
+      const updatedDoc = changeDocDataType(
+        fyo,
+        doc,
+        fields,
+        ModelNameEnum.Currency
+      );
+
+      return updatedDoc;
+    }
+
+    case ModelNameEnum.PricingRule: {
+      const fields = [
+        'minAmount',
+        'maxAmount',
+        'discountAmount',
+        'discountRate',
+        'freeItemRate',
+      ];
+
+      const updatedDoc = changeDocDataType(
+        fyo,
+        doc,
+        fields,
+        ModelNameEnum.Currency
+      );
+      return updatedDoc;
+    }
+
+    default:
+      return doc;
+  }
+}
+
+function isValidSyncableDocName(doctype: string): boolean {
+  const syncableDocNames = [
+    ModelNameEnum.Item,
+    ModelNameEnum.ItemGroup,
+    ModelNameEnum.Batch,
+    ModelNameEnum.PricingRule,
+    ModelNameEnum.PriceList,
+  ] as string[];
+
+  if (syncableDocNames.includes(doctype)) {
+    return true;
+  }
+
+  return false;
+}
+
+function getDocTypeName(doc: DocValueMap | Doc): string {
+  const doctype =
+    doc.schemaName ?? doc.referenceType ?? (doc.doctype as string);
+
+  if (['Supplier', 'Customer'].includes(doctype as string)) {
+    return ModelNameEnum.Party;
+  }
+
+  if (doctype === 'Party') {
+    if (doc.role && doc.role !== 'Both') {
+      return doc.role as string;
+    }
+  }
+
+  return doctype as string;
+}
+
+export interface InsertDocsAPIResponse {
+  message: {
+    success: boolean;
+    success_log: { name: string; doctype: string }[];
+    failed_log: { name: string; doctype: string }[];
+  };
+}
+
+export interface ERPNSyncDocsResponse {
+  message: {
+    status: string;
+    success: boolean;
+    message: string;
+    data: DocValueMap[];
+    success_log?: DocValueMap[];
+    failed_log?: DocValueMap[];
+  };
+}
+export interface FetchFromBooksResponse {
+  message: {
+    success: boolean;
+    data?: DocValueMap[];
+  };
+}
+
+export interface ERPNextSyncSettingsAPIResponse {
+  message: {
+    success: boolean;
+    app_version: string;
+    message: string;
+    data: {
+      name: string;
+      owner: string;
+      modified: string;
+      modified_by: string;
+      docstatus: boolean;
+      idx: string;
+      enable_sync: boolean;
+      sync_dependant_masters: boolean;
+      sync_interval: string;
+      sync_item: boolean;
+      item_sync_type: string;
+      sync_customer: boolean;
+      customer_sync_type: string;
+      sync_supplier: boolean;
+      supplier_sync_type: string;
+      sync_sales_invoice: boolean;
+      sales_invoice_sync_type: string;
+      sync_sales_payment: boolean;
+      sales_payment_sync_type: string;
+      sync_stock: boolean;
+      stock_sync_type: string;
+      sync_price_list: boolean;
+      price_list_sync_type: string;
+      sync_serial_number: boolean;
+      serial_number_sync_type: string;
+      sync_batches: boolean;
+      batch_sync_type: string;
+      sync_delivery_note: boolean;
+      delivery_note_sync_type: string;
+      doctype: string;
+    };
+  };
+}
+
+function parseSyncSettingsData(
+  res: ERPNextSyncSettingsAPIResponse
+): DocValueMap {
+  return {
+    integrationAppVersion: res.message.app_version,
+    isEnabled: !!res.message.data.enable_sync,
+  };
+}
+
+======================================================================
+FILE: src\utils\export.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { RawValueMap } from 'fyo/core/types';
+import {
+  Field,
+  FieldType,
+  FieldTypeEnum,
+  RawValue,
+  TargetField,
+} from 'schemas/types';
+import { generateCSV } from 'utils/csvParser';
+import { GetAllOptions, QueryFilter } from 'utils/db/types';
+import { getMapFromList, safeParseFloat } from 'utils/index';
+import { ExportField, ExportTableField } from './types';
+
+const excludedFieldTypes: FieldType[] = [
+  FieldTypeEnum.AttachImage,
+  FieldTypeEnum.Attachment,
+];
+
+interface CsvHeader {
+  label: string;
+  schemaName: string;
+  fieldname: string;
+  parentFieldname?: string;
+}
+
+export function getExportFields(
+  fields: Field[],
+  exclude: string[] = []
+): ExportField[] {
+  return fields
+    .filter((f) => !f.computed && f.label && !exclude.includes(f.fieldname))
+    .map((field) => {
+      const { fieldname, label } = field;
+      const fieldtype = field.fieldtype as FieldType;
+      return {
+        fieldname,
+        fieldtype,
+        label,
+        export: !excludedFieldTypes.includes(fieldtype),
+      };
+    });
+}
+
+export function getExportTableFields(
+  fields: Field[],
+  fyo: Fyo
+): ExportTableField[] {
+  return fields
+    .filter((f) => f.fieldtype === FieldTypeEnum.Table)
+    .map((f) => {
+      const target = (f as TargetField).target;
+      const tableFields = fyo.schemaMap[target]?.fields ?? [];
+      const exportTableFields = getExportFields(tableFields, ['name']);
+
+      return {
+        fieldname: f.fieldname,
+        label: f.label,
+        target,
+        fields: exportTableFields,
+      };
+    })
+    .filter((f) => !!f.fields.length);
+}
+
+export async function getJsonExportData(
+  schemaName: string,
+  fields: ExportField[],
+  tableFields: ExportTableField[],
+  limit: number | null,
+  filters: QueryFilter,
+  fyo: Fyo
+): Promise<string> {
+  const data = await getExportData(
+    schemaName,
+    fields,
+    tableFields,
+    limit,
+    filters,
+    fyo
+  );
+  convertParentDataToJsonExport(data.parentData, data.childTableData);
+  return JSON.stringify(data.parentData);
+}
+
+export async function getCsvExportData(
+  schemaName: string,
+  fields: ExportField[],
+  tableFields: ExportTableField[],
+  limit: number | null,
+  filters: QueryFilter,
+  fyo: Fyo
+): Promise<string> {
+  const { childTableData, parentData } = await getExportData(
+    schemaName,
+    fields,
+    tableFields,
+    limit,
+    filters,
+    fyo
+  );
+  /**
+   * parentNameMap: Record<ParentName, Record<ParentFieldName, Rows[]>>
+   */
+  const parentNameMap = getParentNameMap(childTableData);
+  const headers = getCsvHeaders(schemaName, fields, tableFields);
+
+  const rows: RawValue[][] = [];
+  for (const parentRow of parentData) {
+    const parentName = parentRow.name as string;
+    if (!parentName) {
+      continue;
+    }
+
+    const baseRowData = headers.parent.map(
+      (f) => (parentRow[f.fieldname] as RawValue) ?? ''
+    );
+
+    const tableFieldRowMap = parentNameMap[parentName];
+    if (!tableFieldRowMap || !Object.keys(tableFieldRowMap ?? {}).length) {
+      rows.push([baseRowData, headers.child.map(() => '')].flat());
+      continue;
+    }
+
+    for (const tableFieldName in tableFieldRowMap) {
+      const tableRows = tableFieldRowMap[tableFieldName] ?? [];
+
+      for (const tableRow of tableRows) {
+        const tableRowData = headers.child.map((f) => {
+          if (f.parentFieldname !== tableFieldName) {
+            return '';
+          }
+
+          return (tableRow[f.fieldname] as RawValue) ?? '';
+        });
+
+        rows.push([baseRowData, tableRowData].flat());
+      }
+    }
+  }
+
+  const flatHeaders = [headers.parent, headers.child].flat();
+  const labels = flatHeaders.map((f) => f.label);
+  const keys = flatHeaders.map((f) => `${f.schemaName}.${f.fieldname}`);
+
+  rows.unshift(keys);
+  rows.unshift(labels);
+
+  return generateCSV(rows);
+}
+
+function getCsvHeaders(
+  schemaName: string,
+  fields: ExportField[],
+  tableFields: ExportTableField[]
+) {
+  const headers = {
+    parent: [] as CsvHeader[],
+    child: [] as CsvHeader[],
+  };
+  for (const { label, fieldname, fieldtype, export: shouldExport } of fields) {
+    if (!shouldExport || fieldtype === FieldTypeEnum.Table) {
+      continue;
+    }
+
+    headers.parent.push({ schemaName, label, fieldname });
+  }
+
+  for (const tf of tableFields) {
+    if (!fields.find((f) => f.fieldname === tf.fieldname)?.export) {
+      continue;
+    }
+
+    for (const field of tf.fields) {
+      if (!field.export) {
+        continue;
+      }
+
+      headers.child.push({
+        schemaName: tf.target,
+        label: field.label,
+        fieldname: field.fieldname,
+        parentFieldname: tf.fieldname,
+      });
+    }
+  }
+
+  return headers;
+}
+
+function getParentNameMap(childTableData: Record<string, RawValueMap[]>) {
+  const parentNameMap: Record<string, Record<string, RawValueMap[]>> = {};
+  for (const key in childTableData) {
+    for (const row of childTableData[key]) {
+      const parent = row.parent as string;
+      if (!parent) {
+        continue;
+      }
+
+      parentNameMap[parent] ??= {};
+      parentNameMap[parent][key] ??= [];
+      parentNameMap[parent][key].push(row);
+    }
+  }
+  return parentNameMap;
+}
+
+async function getExportData(
+  schemaName: string,
+  fields: ExportField[],
+  tableFields: ExportTableField[],
+  limit: number | null,
+  filters: QueryFilter,
+  fyo: Fyo
+) {
+  const parentData = await getParentData(
+    schemaName,
+    filters,
+    fields,
+    limit,
+    fyo
+  );
+  const parentNames = parentData.map((f) => f.name as string).filter(Boolean);
+  const childTableData = await getAllChildTableData(
+    tableFields,
+    fields,
+    parentNames,
+    fyo
+  );
+  return { parentData, childTableData };
+}
+
+function convertParentDataToJsonExport(
+  parentData: RawValueMap[],
+  childTableData: Record<string, RawValueMap[]>
+) {
+  /**
+   * Map from List does not create copies. Map is a
+   * map of references, hence parentData is altered.
+   */
+
+  const nameMap = getMapFromList(parentData, 'name');
+  for (const fieldname in childTableData) {
+    const data = childTableData[fieldname];
+
+    for (const row of data) {
+      const parent = row.parent as string | undefined;
+      if (!parent || !nameMap?.[parent]) {
+        continue;
+      }
+
+      nameMap[parent][fieldname] ??= [];
+
+      delete row.parent;
+      delete row.name;
+
+      (nameMap[parent][fieldname] as RawValueMap[]).push(row);
+    }
+  }
+}
+
+async function getParentData(
+  schemaName: string,
+  filters: QueryFilter,
+  fields: ExportField[],
+  limit: number | null,
+  fyo: Fyo
+) {
+  const orderBy = ['created'];
+  if (fyo.db.fieldMap[schemaName]['date']) {
+    orderBy.unshift('date');
+  }
+
+  const options: GetAllOptions = { filters, orderBy, order: 'desc' };
+  if (limit) {
+    options.limit = limit;
+  }
+
+  options.fields = fields
+    .filter((f) => f.export && f.fieldtype !== FieldTypeEnum.Table)
+    .map((f) => f.fieldname);
+  if (!options.fields.includes('name')) {
+    options.fields.unshift('name');
+  }
+  const data = await fyo.db.getAllRaw(schemaName, options);
+  convertRawPesaToFloat(data, fields);
+  return data;
+}
+
+async function getAllChildTableData(
+  tableFields: ExportTableField[],
+  parentFields: ExportField[],
+  parentNames: string[],
+  fyo: Fyo
+) {
+  const childTables: Record<string, RawValueMap[]> = {};
+
+  // Getting Child Row data
+  for (const tf of tableFields) {
+    const f = parentFields.find((f) => f.fieldname === tf.fieldname);
+    if (!f?.export) {
+      continue;
+    }
+
+    childTables[tf.fieldname] = await getChildTableData(tf, parentNames, fyo);
+  }
+
+  return childTables;
+}
+
+async function getChildTableData(
+  exportTableField: ExportTableField,
+  parentNames: string[],
+  fyo: Fyo
+) {
+  const exportTableFields = exportTableField.fields
+    .filter((f) => f.export && f.fieldtype !== FieldTypeEnum.Table)
+    .map((f) => f.fieldname);
+  if (!exportTableFields.includes('parent')) {
+    exportTableFields.unshift('parent');
+  }
+
+  const data = await fyo.db.getAllRaw(exportTableField.target, {
+    orderBy: 'idx',
+    fields: exportTableFields,
+    filters: { parent: ['in', parentNames] },
+  });
+  convertRawPesaToFloat(data, exportTableField.fields);
+  return data;
+}
+
+function convertRawPesaToFloat(data: RawValueMap[], fields: ExportField[]) {
+  const currencyFields = fields.filter(
+    (f) => f.fieldtype === FieldTypeEnum.Currency
+  );
+
+  for (const row of data) {
+    for (const { fieldname } of currencyFields) {
+      row[fieldname] = safeParseFloat((row[fieldname] ?? '0') as string);
+    }
+  }
+}
+
+======================================================================
+FILE: src\utils\filters.ts
+======================================================================
+import { ModelNameEnum } from 'models/types';
+
+export const routeFilters = {
+  SalesItems: { for: ['in', ['Sales', 'Both']] },
+  PurchaseItems: { for: ['in', ['Purchases', 'Both']] },
+  Items: { for: 'Both' },
+  PurchasePayments: {
+    referenceType: ModelNameEnum.PurchaseInvoice,
+  },
+  SalesPayments: {
+    referenceType: ModelNameEnum.SalesInvoice,
+  },
+  Suppliers: { role: ['in', ['Supplier', 'Both']] },
+  Customers: { role: ['in', ['Customer', 'Both']] },
+  Party: { role: 'Both' },
+};
+
+export const createFilters = {
+  SalesItems: { for: 'Sales' },
+  PurchaseItems: { for: 'Purchases' },
+  Items: { for: 'Both' },
+  PurchasePayments: { paymentType: 'Pay' },
+  SalesPayments: { paymentType: 'Receive' },
+  Suppliers: { role: 'Supplier' },
+  Customers: { role: 'Customer' },
+  Party: { role: 'Both' },
+};
+
+======================================================================
+FILE: src\utils\getStartedConfig.ts
+======================================================================
+import { t } from 'fyo';
+import { ModelNameEnum } from 'models/types';
+import { openSettings, routeTo } from './ui';
+import { GetStartedConfigItem } from './types';
+
+export function getGetStartedConfig(): GetStartedConfigItem[] {
+  /* eslint-disable @typescript-eslint/no-misused-promises */
+  return [
+    {
+      label: t`Organisation`,
+      items: [
+        {
+          key: 'General',
+          label: t`General`,
+          icon: 'general',
+          description: t`Set up your company information, email, country and fiscal year`,
+          fieldname: 'companySetup',
+          action: () => openSettings(ModelNameEnum.AccountingSettings),
+        },
+        {
+          key: 'Print',
+          label: t`Print`,
+          icon: 'invoice',
+          description: t`Customize your invoices by adding a logo and address details`,
+          fieldname: 'printSetup',
+          action: () => openSettings(ModelNameEnum.PrintSettings),
+        },
+        {
+          key: 'System',
+          label: t`System`,
+          icon: 'system',
+          description: t`Setup system defaults like date format and display precision`,
+          fieldname: 'systemSetup',
+          action: () => openSettings(ModelNameEnum.SystemSettings),
+        },
+      ],
+    },
+    {
+      label: t`Accounts`,
+      items: [
+        {
+          key: 'Review Accounts',
+          label: t`Review Accounts`,
+          icon: 'review-ac',
+          description: t`Review your chart of accounts, add any account or tax heads as needed`,
+          action: () => routeTo('/chart-of-accounts'),
+          fieldname: 'chartOfAccountsReviewed',
+          documentation: 'https://docs.frappe.io/books/chart-of-accounts',
+        },
+        {
+          key: 'Opening Balances',
+          label: t`Opening Balances`,
+          icon: 'opening-ac',
+          fieldname: 'openingBalanceChecked',
+          description: t`Set up your opening balances before performing any accounting entries`,
+          documentation: 'https://docs.frappe.io/books/setup-opening-balances',
+        },
+        {
+          key: 'Add Taxes',
+          label: t`Add Taxes`,
+          icon: 'percentage',
+          fieldname: 'taxesAdded',
+          description: t`Set up your tax templates for your sales or purchase transactions`,
+          action: () => routeTo('/list/Tax'),
+          documentation:
+            'https://docs.frappe.io/books/create-initial-entries#add-taxes',
+        },
+      ],
+    },
+    {
+      label: t`Sales`,
+      items: [
+        {
+          key: 'Add Sales Items',
+          label: t`Add Items`,
+          icon: 'item',
+          description: t`Add products or services that you sell to your customers`,
+          action: () =>
+            routeTo({
+              path: `/list/Item/${t`Sales Items`}`,
+              query: {
+                filters: JSON.stringify({ for: 'Sales' }),
+              },
+            }),
+          fieldname: 'salesItemCreated',
+          documentation:
+            'https://docs.frappe.io/books/create-initial-entries#add-sales-items',
+        },
+        {
+          key: 'Add Customers',
+          label: t`Add Customers`,
+          icon: 'customer',
+          description: t`Add a few customers to create your first sales invoice`,
+          action: () =>
+            routeTo({
+              path: `/list/Party/${t`Customers`}`,
+              query: {
+                filters: JSON.stringify({ role: 'Customer' }),
+              },
+            }),
+          fieldname: 'customerCreated',
+          documentation:
+            'https://docs.frappe.io/books/create-initial-entries#add-customers',
+        },
+        {
+          key: 'Create Sales Invoice',
+          label: t`Create Sales Invoice`,
+          icon: 'sales-invoice',
+          description: t`Create your first sales invoice for the created customer`,
+          action: () => routeTo('/list/SalesInvoice'),
+          fieldname: 'invoiceCreated',
+          documentation: 'https://docs.frappe.io/books/sales-invoices',
+        },
+      ],
+    },
+    {
+      label: t`Purchase`,
+      items: [
+        {
+          key: 'Add Purchase Items',
+          label: t`Add Items`,
+          icon: 'item',
+          description: t`Add products or services that you buy from your suppliers`,
+          action: () =>
+            routeTo({
+              path: `/list/Item/${t`Purchase Items`}`,
+              query: {
+                filters: JSON.stringify({ for: 'Purchases' }),
+              },
+            }),
+          fieldname: 'purchaseItemCreated',
+        },
+        {
+          key: 'Add Suppliers',
+          label: t`Add Suppliers`,
+          icon: 'supplier',
+          description: t`Add a few suppliers to create your first purchase invoice`,
+          action: () =>
+            routeTo({
+              path: `/list/Party/${t`Suppliers`}`,
+              query: { filters: JSON.stringify({ role: 'Supplier' }) },
+            }),
+          fieldname: 'supplierCreated',
+        },
+        {
+          key: 'Create Purchase Invoice',
+          label: t`Create Purchase Invoice`,
+          icon: 'purchase-invoice',
+          description: t`Create your first purchase invoice from the created supplier`,
+          action: () => routeTo('/list/PurchaseInvoice'),
+          fieldname: 'billCreated',
+          documentation:
+            'https://docs.frappe.io/books/purchase-invoices#creating-purchase-invoices',
+        },
+      ],
+    },
+  ];
+}
+
+======================================================================
+FILE: src\utils\index.ts
+======================================================================
+/**
+ * General purpose utils used by the frontend.
+ */
+import { t } from 'fyo';
+import { Doc } from 'fyo/model/doc';
+import { isPesa } from 'fyo/utils';
+import {
+  BaseError,
+  DuplicateEntryError,
+  LinkValidationError,
+} from 'fyo/utils/errors';
+import { Field, FieldType, FieldTypeEnum, NumberField } from 'schemas/types';
+import { fyo } from 'src/initFyo';
+
+export function stringifyCircular(
+  obj: unknown,
+  ignoreCircular = false,
+  convertDocument = false
+): string {
+  const cacheKey: string[] = [];
+  const cacheValue: unknown[] = [];
+
+  return JSON.stringify(obj, (key: string, value: unknown) => {
+    if (typeof value !== 'object' || value === null) {
+      cacheKey.push(key);
+      cacheValue.push(value);
+      return value;
+    }
+
+    if (cacheValue.includes(value)) {
+      const circularKey: string =
+        cacheKey[cacheValue.indexOf(value)] || '{self}';
+      return ignoreCircular ? undefined : `[Circular:${circularKey}]`;
+    }
+
+    cacheKey.push(key);
+    cacheValue.push(value);
+
+    if (convertDocument && value instanceof Doc) {
+      return value.getValidDict();
+    }
+
+    return value;
+  });
+}
+
+export function fuzzyMatch(input: string, target: string) {
+  const keywordLetters = [...input];
+  const candidateLetters = [...target];
+
+  let keywordLetter = keywordLetters.shift();
+  let candidateLetter = candidateLetters.shift();
+
+  let isMatch = true;
+  let distance = 0;
+
+  while (keywordLetter && candidateLetter) {
+    if (keywordLetter === candidateLetter) {
+      keywordLetter = keywordLetters.shift();
+    } else if (keywordLetter.toLowerCase() === candidateLetter.toLowerCase()) {
+      keywordLetter = keywordLetters.shift();
+      distance += 0.5;
+    } else {
+      distance += 1;
+    }
+
+    candidateLetter = candidateLetters.shift();
+  }
+
+  if (keywordLetter !== undefined) {
+    distance = Number.MAX_SAFE_INTEGER;
+    isMatch = false;
+  } else {
+    distance += candidateLetters.length;
+  }
+
+  return { isMatch, distance };
+}
+
+export function convertPesaValuesToFloat(obj: Record<string, unknown>) {
+  Object.keys(obj).forEach((key) => {
+    const value = obj[key];
+    if (!isPesa(value)) {
+      return;
+    }
+
+    obj[key] = value.float;
+  });
+}
+
+export function getErrorMessage(e: Error, doc?: Doc): string {
+  const errorMessage = e.message || t`An error occurred.`;
+
+  let { schemaName, name } = doc ?? {};
+  if (!doc) {
+    schemaName = (e as BaseError).more?.schemaName as string | undefined;
+    name = (e as BaseError).more?.value as string | undefined;
+  }
+
+  if (!schemaName || !name) {
+    return errorMessage;
+  }
+
+  const label = fyo.db.schemaMap[schemaName]?.label ?? schemaName;
+  if (e instanceof LinkValidationError) {
+    return t`${label} ${name} is linked with existing records.`;
+  } else if (e instanceof DuplicateEntryError) {
+    return t`${label} ${name} already exists.`;
+  }
+
+  return errorMessage;
+}
+
+export function isNumeric(
+  fieldtype: FieldType
+): fieldtype is NumberField['fieldtype'];
+export function isNumeric(fieldtype: Field): fieldtype is NumberField;
+export function isNumeric(
+  fieldtype: Field | FieldType
+): fieldtype is NumberField | NumberField['fieldtype'] {
+  if (typeof fieldtype !== 'string') {
+    fieldtype = fieldtype?.fieldtype;
+  }
+
+  const numericTypes: FieldType[] = [
+    FieldTypeEnum.Int,
+    FieldTypeEnum.Float,
+    FieldTypeEnum.Currency,
+  ];
+
+  return numericTypes.includes(fieldtype);
+}
+
+======================================================================
+FILE: src\utils\initialization.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { ConfigFile } from 'fyo/core/types';
+import { getRegionalModels, models } from 'models/index';
+import { ModelNameEnum } from 'models/types';
+import { TargetField } from 'schemas/types';
+import {
+  getMapFromList,
+  getRandomString,
+  getValueMapFromList,
+} from 'utils/index';
+
+export async function initializeInstance(
+  dbPath: string,
+  isNew: boolean,
+  countryCode: string,
+  fyo: Fyo
+) {
+  if (isNew) {
+    await closeDbIfConnected(fyo);
+    countryCode = await fyo.db.createNewDatabase(dbPath, countryCode);
+  } else if (!fyo.db.isConnected) {
+    countryCode = await fyo.db.connectToDatabase(dbPath);
+  }
+
+  const regionalModels = await getRegionalModels(countryCode);
+  await fyo.initializeAndRegister(models, regionalModels);
+
+  await checkSingleLinks(fyo);
+  await setSingles(fyo);
+  await setCreds(fyo);
+  await setVersion(fyo);
+  setDeviceId(fyo);
+  await setInstanceId(fyo);
+  await setOpenCount(fyo);
+  await setCurrencySymbols(fyo);
+}
+
+async function closeDbIfConnected(fyo: Fyo) {
+  if (!fyo.db.isConnected) {
+    return;
+  }
+
+  await fyo.db.purgeCache();
+}
+
+async function setSingles(fyo: Fyo) {
+  for (const schema of Object.values(fyo.schemaMap)) {
+    if (!schema?.isSingle || schema.name === ModelNameEnum.SetupWizard) {
+      continue;
+    }
+
+    await fyo.doc.getDoc(schema.name);
+  }
+}
+
+async function checkSingleLinks(fyo: Fyo) {
+  /**
+   * Required cause SingleValue tables don't maintain
+   * referential integrity. Hence values Linked in the
+   * Singles table can be deleted.
+   *
+   * These deleted links can prevent the db from loading.
+   */
+
+  const linkFields = Object.values(fyo.db.schemaMap)
+    .filter((schema) => schema?.isSingle)
+    .map((schema) => schema!.fields)
+    .flat()
+    .filter((field) => field.fieldtype === 'Link' && field.target)
+    .map((field) => ({
+      fieldKey: `${field.schemaName!}.${field.fieldname}`,
+      target: (field as TargetField).target,
+    }));
+  const linkFieldsMap = getMapFromList(linkFields, 'fieldKey');
+
+  const singleValues = (await fyo.db.getAllRaw('SingleValue', {
+    fields: ['name', 'parent', 'fieldname', 'value'],
+  })) as { name: string; parent: string; fieldname: string; value: string }[];
+
+  const exists: Record<string, Record<string, boolean>> = {};
+
+  for (const { name, fieldname, parent, value } of singleValues) {
+    const fieldKey = `${parent}.${fieldname}`;
+    if (!linkFieldsMap[fieldKey]) {
+      continue;
+    }
+
+    const { target } = linkFieldsMap[fieldKey];
+    if (typeof value !== 'string' || !value || !target) {
+      continue;
+    }
+
+    exists[target] ??= {};
+    if (exists[target][value] === undefined) {
+      exists[target][value] = await fyo.db.exists(target, value);
+    }
+
+    if (exists[target][value]) {
+      continue;
+    }
+
+    await fyo.db.delete('SingleValue', name);
+  }
+}
+
+async function setCreds(fyo: Fyo) {
+  const email = (await fyo.getValue(
+    ModelNameEnum.AccountingSettings,
+    'email'
+  )) as string | undefined;
+  const user = fyo.auth.user;
+  fyo.auth.user = email ?? user;
+}
+
+async function setVersion(fyo: Fyo) {
+  const version = (await fyo.getValue(
+    ModelNameEnum.SystemSettings,
+    'version'
+  )) as string | undefined;
+
+  const { appVersion } = fyo.store;
+  if (version !== appVersion) {
+    const systemSettings = await fyo.doc.getDoc(ModelNameEnum.SystemSettings);
+    await systemSettings?.setAndSync('version', appVersion);
+  }
+}
+
+function setDeviceId(fyo: Fyo) {
+  let deviceId = fyo.config.get('deviceId');
+  if (deviceId === undefined) {
+    deviceId = getRandomString();
+    fyo.config.set('deviceId', deviceId);
+  }
+
+  fyo.store.deviceId = deviceId;
+}
+
+async function setInstanceId(fyo: Fyo) {
+  const systemSettings = await fyo.doc.getDoc(ModelNameEnum.SystemSettings);
+  if (!systemSettings.instanceId) {
+    await systemSettings.setAndSync('instanceId', getRandomString());
+  }
+
+  fyo.store.instanceId = (await fyo.getValue(
+    ModelNameEnum.SystemSettings,
+    'instanceId'
+  )) as string;
+}
+
+export async function setCurrencySymbols(fyo: Fyo) {
+  const currencies = (await fyo.db.getAll(ModelNameEnum.Currency, {
+    fields: ['name', 'symbol'],
+  })) as { name: string; symbol: string }[];
+
+  fyo.currencySymbols = getValueMapFromList(
+    currencies,
+    'name',
+    'symbol'
+  ) as Record<string, string | undefined>;
+}
+
+async function setOpenCount(fyo: Fyo) {
+  const misc = await fyo.doc.getDoc(ModelNameEnum.Misc);
+  let openCount = misc.openCount as number | null;
+
+  if (typeof openCount !== 'number') {
+    openCount = getOpenCountFromFiles(fyo);
+  }
+
+  if (typeof openCount !== 'number') {
+    openCount = 0;
+  }
+
+  openCount += 1;
+  await misc.setAndSync('openCount', openCount);
+}
+
+function getOpenCountFromFiles(fyo: Fyo) {
+  const configFile = fyo.config.get('files', []) as ConfigFile[];
+  for (const file of configFile) {
+    if (file.id === fyo.singles.SystemSettings?.instanceId) {
+      return file.openCount ?? 0;
+    }
+  }
+
+  return null;
+}
+
+======================================================================
+FILE: src\utils\injectionKeys.ts
+======================================================================
+import type { InjectionKey, Ref } from 'vue';
+import type { Search } from './search';
+import type { Shortcuts } from './shortcuts';
+import type { useKeys } from './vueUtils';
+
+export const languageDirectionKey = Symbol('languageDirection') as InjectionKey<
+  Ref<'ltr' | 'rtl'>
+>;
+
+export const keysKey = Symbol('keys') as InjectionKey<
+  ReturnType<typeof useKeys>
+>;
+
+export const searcherKey = Symbol('searcher') as InjectionKey<
+  Ref<null | Search>
+>;
+
+export const shortcutsKey = Symbol('shortcuts') as InjectionKey<Shortcuts>;
+
+======================================================================
+FILE: src\utils\interactive.ts
+======================================================================
+import { t } from 'fyo';
+import Dialog from 'src/components/Dialog.vue';
+import Toast from 'src/components/Toast.vue';
+import { App, createApp, h } from 'vue';
+import { getColorClass } from './colors';
+import { DialogButton, DialogOptions, ToastOptions, ToastType } from './types';
+
+export async function showDialog<DO extends DialogOptions>(options: DO) {
+  const preWrappedButtons: DialogButton[] = options.buttons ?? [
+    { label: t`Okay`, action: () => null, isEscape: true },
+  ];
+
+  const resultPromise = new Promise((resolve, reject) => {
+    const buttons = preWrappedButtons.map((config) => {
+      return {
+        ...config,
+        action: async () => {
+          try {
+            resolve(await config.action());
+          } catch (error) {
+            reject(error);
+          }
+        },
+      };
+    });
+
+    const dialogApp = createApp({
+      render() {
+        return h(Dialog, { ...options, buttons });
+      },
+    });
+
+    fragmentMountComponent(dialogApp);
+  });
+
+  return await resultPromise;
+}
+
+export function showToast(options: ToastOptions) {
+  const toastApp = createApp({
+    render() {
+      return h(Toast, { ...options });
+    },
+  });
+
+  fragmentMountComponent(toastApp);
+}
+
+function fragmentMountComponent(app: App<Element>) {
+  const fragment = document.createDocumentFragment();
+
+  // @ts-ignore
+  app.mount(fragment);
+  document.body.append(fragment);
+}
+
+export function getIconConfig(type: ToastType) {
+  let iconName = 'alert-circle';
+  if (type === 'warning') {
+    iconName = 'alert-triangle';
+  } else if (type === 'success') {
+    iconName = 'check-circle';
+  }
+
+  const color = {
+    info: 'blue',
+    warning: 'orange',
+    error: 'red',
+    success: 'green',
+  }[type];
+
+  const iconColor = getColorClass(color ?? 'gray', 'text', 400);
+  const containerBackground = getColorClass(color ?? 'gray', 'bg', 100);
+  const containerBorder = getColorClass(color ?? 'gray', 'border', 300);
+
+  return { iconName, color, iconColor, containerBorder, containerBackground };
+}
+
+======================================================================
+FILE: src\utils\language.ts
+======================================================================
+import { DEFAULT_LANGUAGE } from 'fyo/utils/consts';
+import { setLanguageMapOnTranslationString } from 'fyo/utils/translation';
+import { fyo } from 'src/initFyo';
+import { systemLanguageRef } from './refs';
+
+// Language: Language Code in books/translations
+export const languageCodeMap: Record<string, string> = {
+  Arabic: 'ar',
+  Catalan: 'ca-ES',
+  Danish: 'da',
+  Dutch: 'nl',
+  English: 'en',
+  French: 'fr',
+  German: 'de',
+  Gujarati: 'gu',
+  Hindi: 'hi',
+  Indonesian: 'id',
+  Korean: 'ko',
+  Nepali: 'np',
+  Persian: 'fa',
+  Portuguese: 'pt',
+  'Simplified Chinese': 'zh-CN',
+  'Traditional Chinese': 'zh-Hant',
+  Spanish: 'es',
+  Swedish: 'sv',
+  Albanian: 'sq',
+  Turkish: 'tr',
+};
+
+export async function setLanguageMap(
+  initLanguage?: string,
+  dontReload = false
+) {
+  const oldLanguage = fyo.config.get('language') as string;
+  initLanguage ??= oldLanguage;
+  const { code, language, usingDefault } = getLanguageCode(
+    initLanguage,
+    oldLanguage
+  );
+
+  let success = true;
+  if (code === 'en') {
+    setLanguageMapOnTranslationString(undefined);
+  } else {
+    success = await fetchAndSetLanguageMap(code);
+  }
+
+  if (success && !usingDefault) {
+    fyo.config.set('language', language);
+    systemLanguageRef.value = language;
+  }
+
+  if (!dontReload && success && initLanguage !== oldLanguage) {
+    ipc.reloadWindow();
+  }
+  return success;
+}
+
+function getLanguageCode(initLanguage: string, oldLanguage: string) {
+  let language = initLanguage ?? oldLanguage;
+  let usingDefault = false;
+
+  if (!language) {
+    language = DEFAULT_LANGUAGE;
+    usingDefault = true;
+  }
+  const code = languageCodeMap[language] ?? 'en';
+  return { code, language, usingDefault };
+}
+
+async function fetchAndSetLanguageMap(code: string) {
+  const { success, message, languageMap } = await ipc.getLanguageMap(code);
+
+  if (!success) {
+    const { showToast } = await import('src/utils/interactive');
+    showToast({ type: 'error', message });
+  } else {
+    setLanguageMapOnTranslationString(languageMap);
+    await fyo.db.translateSchemaMap(languageMap);
+  }
+
+  return success;
+}
+
+======================================================================
+FILE: src\utils\misc.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { ConfigFile } from 'fyo/core/types';
+import { translateSchema } from 'fyo/utils/translation';
+import { cloneDeep } from 'lodash';
+import { DateTime } from 'luxon';
+import { SetupWizard } from 'models/baseModels/SetupWizard/SetupWizard';
+import { ModelNameEnum } from 'models/types';
+import { reports } from 'reports/index';
+import SetupWizardSchema from 'schemas/app/SetupWizard.json';
+import { Schema } from 'schemas/types';
+import { fyo } from 'src/initFyo';
+import { QueryFilter } from 'utils/db/types';
+import { schemaTranslateables } from 'utils/translationHelpers';
+import type { LanguageMap } from 'utils/types';
+import { PeriodKey } from './types';
+
+export function getDatesAndPeriodList(period: PeriodKey): {
+  periodList: DateTime[];
+  fromDate: DateTime;
+  toDate: DateTime;
+} {
+  const toDate: DateTime = DateTime.now().plus({ days: 1 });
+  let fromDate: DateTime;
+
+  if (period === 'This Year') {
+    fromDate = toDate.minus({ months: 12 });
+  } else if (period === 'YTD') {
+    fromDate = DateTime.now().startOf('year');
+  } else if (period === 'This Quarter') {
+    fromDate = toDate.minus({ months: 3 });
+  } else if (period === 'This Month') {
+    fromDate = toDate.startOf('month');
+  } else {
+    fromDate = toDate.minus({ days: 1 });
+  }
+
+  /**
+   * periodList: Monthly decrements before toDate until fromDate
+   */
+  const periodList: DateTime[] = [toDate];
+  while (true) {
+    const nextDate = periodList.at(0)!.minus({ months: 1 });
+    if (nextDate.toMillis() < fromDate.toMillis()) {
+      if (period === 'YTD') {
+        periodList.unshift(nextDate);
+        break;
+      }
+      break;
+    }
+
+    periodList.unshift(nextDate);
+  }
+  periodList.shift();
+
+  return {
+    periodList,
+    fromDate,
+    toDate,
+  };
+}
+
+export function getSetupWizardDoc(languageMap?: LanguageMap) {
+  /**
+   * This is used cause when setup wizard is running
+   * the database isn't yet initialized.
+   */
+  const schema = cloneDeep(SetupWizardSchema);
+  if (languageMap) {
+    translateSchema(schema, languageMap, schemaTranslateables);
+  }
+  return fyo.doc.getNewDoc(
+    'SetupWizard',
+    {},
+    false,
+    schema as Schema,
+    SetupWizard
+  );
+}
+
+export function updateConfigFiles(fyo: Fyo): ConfigFile {
+  const configFiles = fyo.config.get('files', []) as ConfigFile[];
+
+  const companyName = fyo.singles.AccountingSettings!.companyName as string;
+  const id = fyo.singles.SystemSettings!.instanceId as string;
+  const dbPath = fyo.db.dbPath!;
+  const openCount = fyo.singles.Misc!.openCount as number;
+
+  const fileIndex = configFiles.findIndex((f) => f.id === id);
+  let newFile = { id, companyName, dbPath, openCount } as ConfigFile;
+
+  if (fileIndex === -1) {
+    configFiles.push(newFile);
+  } else {
+    configFiles[fileIndex].companyName = companyName;
+    configFiles[fileIndex].dbPath = dbPath;
+    configFiles[fileIndex].openCount = openCount;
+    newFile = configFiles[fileIndex];
+  }
+
+  fyo.config.set('files', configFiles);
+  return newFile;
+}
+
+export const docsPathMap: Record<string, string | undefined> = {
+  // Analytics
+  Dashboard: 'books/dashboard',
+  Reports: 'books/reports',
+  GeneralLedger: 'books/general-ledger',
+  ProfitAndLoss: 'books/profit-and-loss',
+  BalanceSheet: 'books/balance-sheet',
+  TrialBalance: 'books/trial-balance',
+
+  // Transactions
+  [ModelNameEnum.SalesInvoice]: 'books/sales-invoices',
+  [ModelNameEnum.PurchaseInvoice]: 'books/purchase-invoices',
+  [ModelNameEnum.Payment]: 'books/payments',
+  [ModelNameEnum.JournalEntry]: 'books/journal-entries',
+
+  // Inventory
+  [ModelNameEnum.StockMovement]: 'books/stock-movement',
+  [ModelNameEnum.Shipment]: 'books/shipment',
+  [ModelNameEnum.PurchaseReceipt]: 'books/purchase-receipt',
+  StockLedger: 'books/stock-ledger',
+  StockBalance: 'books/stock-balance',
+  [ModelNameEnum.Batch]: 'books/batches',
+
+  // Entries
+  Entries: 'books/books',
+  [ModelNameEnum.Party]: 'books/party',
+  [ModelNameEnum.Item]: 'books/items',
+  [ModelNameEnum.Tax]: 'books/taxes',
+  [ModelNameEnum.PrintTemplate]: 'books/print-templates',
+
+  // Miscellaneous
+  Search: 'books/quick-search',
+  NumberSeries: 'books/number-series',
+  ImportWizard: 'books/import-wizard',
+  Settings: 'books/settings',
+  ChartOfAccounts: 'books/chart-of-accounts',
+};
+
+export async function getDataURL(type: string, data: Uint8Array) {
+  const blob = new Blob([data], { type });
+
+  return new Promise<string>((resolve) => {
+    const fr = new FileReader();
+    fr.addEventListener('loadend', () => {
+      resolve(fr.result as string);
+    });
+
+    fr.readAsDataURL(blob);
+  });
+}
+
+export async function convertFileToDataURL(file: File, type: string) {
+  const buffer = await file.arrayBuffer();
+  const array = new Uint8Array(buffer);
+  return await getDataURL(type, array);
+}
+
+export function getCreateFiltersFromListViewFilters(filters: QueryFilter) {
+  const createFilters: Record<string, string | number | boolean | null> = {};
+
+  for (const key in filters) {
+    let value: typeof filters[string] | undefined | number = filters[key];
+
+    if (Array.isArray(value) && value[0] === 'in' && Array.isArray(value[1])) {
+      value = value[1].filter((v) => v !== 'Both')[0];
+    }
+
+    if (value === undefined || Array.isArray(value)) {
+      continue;
+    }
+
+    createFilters[key] = value;
+  }
+
+  return createFilters;
+}
+
+export function getIsMac() {
+  return navigator.userAgent.indexOf('Mac') !== -1;
+}
+
+export async function getReport(name: keyof typeof reports) {
+  const cachedReport = fyo.store.reports[name];
+  if (cachedReport) {
+    return cachedReport;
+  }
+
+  const report = new reports[name](fyo);
+  await report.initialize();
+  fyo.store.reports[name] = report;
+  return report;
+}
+
+======================================================================
+FILE: src\utils\pos.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { ValidationError } from 'fyo/utils/errors';
+import { AccountTypeEnum } from 'models/baseModels/Account/types';
+import { Item } from 'models/baseModels/Item/Item';
+import { SalesInvoice } from 'models/baseModels/SalesInvoice/SalesInvoice';
+import { SalesInvoiceItem } from 'models/baseModels/SalesInvoiceItem/SalesInvoiceItem';
+import { POSOpeningShift } from 'models/inventory/Point of Sale/POSOpeningShift';
+import { ModelNameEnum } from 'models/types';
+import { Money } from 'pesa';
+import { ItemQtyMap, ItemSerialNumbers } from 'src/components/POS/types';
+import { fyo } from 'src/initFyo';
+import { safeParseFloat } from 'utils/index';
+import { showToast } from './interactive';
+import { POSClosingShift } from 'models/inventory/Point of Sale/POSClosingShift';
+
+export async function getPOSOpeningShiftDoc(
+  fyo: Fyo
+): Promise<POSOpeningShift> {
+  const existingShiftDoc = await fyo.db.getAll(ModelNameEnum.POSOpeningShift, {
+    limit: 1,
+    orderBy: 'created',
+    fields: ['name'],
+  });
+
+  if (!fyo.singles.POSSettings?.isShiftOpen || !existingShiftDoc) {
+    return fyo.doc.getNewDoc(ModelNameEnum.POSOpeningShift) as POSOpeningShift;
+  }
+
+  return (await fyo.doc.getDoc(
+    ModelNameEnum.POSOpeningShift,
+    existingShiftDoc[0].name as string
+  )) as POSOpeningShift;
+}
+
+export function getTotalQuantity(items: SalesInvoiceItem[]): number {
+  let totalQuantity = safeParseFloat(0);
+
+  if (!items.length) {
+    return totalQuantity;
+  }
+
+  for (const item of items) {
+    const quantity = item.quantity ?? 0;
+    totalQuantity = safeParseFloat(totalQuantity + quantity);
+  }
+  return totalQuantity;
+}
+
+export function getItemDiscounts(items: SalesInvoiceItem[]): Money {
+  let itemDiscounts = fyo.pesa(0);
+
+  if (!items.length) {
+    return itemDiscounts;
+  }
+
+  for (const item of items) {
+    if (item.setItemDiscountAmount) {
+      if (!item.itemDiscountAmount?.isZero()) {
+        itemDiscounts = itemDiscounts.add(
+          (item.itemDiscountAmount as Money).mul(item.quantity as number)
+        );
+      }
+    } else {
+      if (item.amount && (item.itemDiscountPercent as number) > 1) {
+        itemDiscounts = itemDiscounts.add(
+          item.amount.percent(item.itemDiscountPercent as number)
+        );
+      }
+    }
+  }
+  return itemDiscounts;
+}
+
+export async function getItem(item: string): Promise<Item | undefined> {
+  const itemDoc = (await fyo.doc.getDoc(ModelNameEnum.Item, item)) as Item;
+  if (!itemDoc) {
+    return;
+  }
+
+  return itemDoc;
+}
+
+export async function validateSinv(
+  sinvDoc: SalesInvoice,
+  itemQtyMap: ItemQtyMap
+) {
+  if (!sinvDoc) {
+    return;
+  }
+
+  await validateSinvItems(
+    sinvDoc.items as SalesInvoiceItem[],
+    itemQtyMap,
+    sinvDoc.returnAgainst as string
+  );
+}
+
+async function validateSinvItems(
+  sinvItems: SalesInvoiceItem[],
+  itemQtyMap: ItemQtyMap,
+  isReturn?: string
+) {
+  for (const item of sinvItems) {
+    const trackItem = await fyo.getValue(
+      ModelNameEnum.Item,
+      item.item as string,
+      'trackItem'
+    );
+
+    if (!trackItem) {
+      return;
+    }
+
+    if (!item.quantity || (item.quantity < 1 && !isReturn)) {
+      throw new ValidationError(
+        t`Invalid Quantity for Item ${item.item as string}`
+      );
+    }
+
+    if (!itemQtyMap[item.item as string]) {
+      throw new ValidationError(t`Item ${item.item as string} not in Stock`);
+    }
+
+    if (item.quantity > itemQtyMap[item.item as string].availableQty) {
+      throw new ValidationError(
+        t`Insufficient Quantity. Item ${item.item as string} has only ${
+          itemQtyMap[item.item as string].availableQty
+        } quantities available. you selected ${item.quantity}`
+      );
+    }
+  }
+}
+
+export async function validateShipment(itemSerialNumbers: ItemSerialNumbers) {
+  if (!itemSerialNumbers) {
+    return;
+  }
+
+  for (const idx in itemSerialNumbers) {
+    const serialNumbers = itemSerialNumbers[idx].split('\n');
+
+    for (const serialNumber of serialNumbers) {
+      const status = await fyo.getValue(
+        ModelNameEnum.SerialNumber,
+        serialNumber,
+        'status'
+      );
+
+      if (status !== 'Active') {
+        throw new ValidationError(
+          t`Serial Number ${serialNumber} status is not Active.`
+        );
+      }
+    }
+  }
+}
+
+export function validateIsPosSettingsSet(fyo: Fyo) {
+  try {
+    const inventory = fyo.singles.POSSettings?.inventory;
+    if (!inventory) {
+      throw new ValidationError(
+        t`POS Inventory is not set. Please set it on POS Settings`
+      );
+    }
+
+    const cashAccount = fyo.singles.POSSettings?.cashAccount;
+    if (!cashAccount) {
+      throw new ValidationError(
+        t`POS Counter Cash Account is not set. Please set it on POS Settings`
+      );
+    }
+
+    const writeOffAccount = fyo.singles.POSSettings?.writeOffAccount;
+    if (!writeOffAccount) {
+      throw new ValidationError(
+        t`POS Write Off Account is not set. Please set it on POS Settings`
+      );
+    }
+  } catch (error) {
+    showToast({
+      type: 'error',
+      message: t`${error as string}`,
+      duration: 'long',
+    });
+  }
+}
+
+export function getTotalTaxedAmount(sinvDoc: SalesInvoice): Money {
+  let totalTaxedAmount = fyo.pesa(0);
+  if (!sinvDoc.items?.length || !sinvDoc.taxes?.length) {
+    return totalTaxedAmount;
+  }
+
+  for (const row of sinvDoc.taxes) {
+    totalTaxedAmount = totalTaxedAmount.add(row.amount as Money);
+  }
+  return totalTaxedAmount;
+}
+
+export function validateClosingAmounts(posShiftDoc: POSClosingShift) {
+  try {
+    if (!posShiftDoc) {
+      throw new ValidationError(
+        `POS Shift Document not loaded. Please reload.`
+      );
+    }
+
+    posShiftDoc.closingAmounts?.map((row) => {
+      if (row.closingAmount?.isNegative()) {
+        throw new ValidationError(
+          t`Closing ${row.paymentMethod as string} Amount can not be negative.`
+        );
+      }
+    });
+  } catch (error) {}
+}
+
+export async function transferPOSCashAndWriteOff(
+  fyo: Fyo,
+  posShiftDoc: POSClosingShift
+) {
+  const expectedCashAmount = posShiftDoc.closingAmounts?.find(
+    (row) => row.paymentMethod === 'Cash'
+  )?.expectedAmount as Money;
+
+  if (expectedCashAmount.isZero()) {
+    return;
+  }
+
+  const closingCashAmount = posShiftDoc.closingAmounts?.find(
+    (row) => row.paymentMethod === 'Cash'
+  )?.closingAmount as Money;
+
+  const jvDoc = fyo.doc.getNewDoc(ModelNameEnum.JournalEntry, {
+    entryType: 'Journal Entry',
+  });
+
+  await jvDoc.append('accounts', {
+    account: AccountTypeEnum.Cash,
+    debit: closingCashAmount,
+  });
+
+  await jvDoc.append('accounts', {
+    account: fyo.singles.POSSettings?.cashAccount,
+    credit: closingCashAmount,
+  });
+
+  const differenceAmount = posShiftDoc?.closingAmounts?.find(
+    (row) => row.paymentMethod === 'Cash'
+  )?.differenceAmount as Money;
+
+  if (differenceAmount.isNegative()) {
+    await jvDoc.append('accounts', {
+      account: AccountTypeEnum.Cash,
+      debit: differenceAmount.abs(),
+      credit: fyo.pesa(0),
+    });
+    await jvDoc.append('accounts', {
+      account: fyo.singles.POSSettings?.writeOffAccount,
+      debit: fyo.pesa(0),
+      credit: differenceAmount.abs(),
+    });
+  }
+
+  if (!differenceAmount.isZero() && differenceAmount.isPositive()) {
+    await jvDoc.append('accounts', {
+      account: fyo.singles.POSSettings?.writeOffAccount,
+      debit: differenceAmount,
+      credit: fyo.pesa(0),
+    });
+    await jvDoc.append('accounts', {
+      account: AccountTypeEnum.Cash,
+      debit: fyo.pesa(0),
+      credit: differenceAmount,
+    });
+  }
+
+  await (await jvDoc.sync()).submit();
+}
+
+export function validateSerialNumberCount(
+  serialNumbers: string | undefined,
+  quantity: number,
+  item: string
+) {
+  let serialNumberCount = 0;
+
+  if (serialNumbers) {
+    serialNumberCount = serialNumbers.split('\n').length;
+  }
+
+  if (Math.abs(quantity) !== serialNumberCount) {
+    const errorMessage = t`Need ${quantity} Serial Numbers for Item ${item}. You have provided ${serialNumberCount}`;
+
+    showToast({
+      type: 'error',
+      message: errorMessage,
+      duration: 'long',
+    });
+    throw new ValidationError(errorMessage);
+  }
+}
+
+======================================================================
+FILE: src\utils\printTemplates.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { Doc } from 'fyo/model/doc';
+import { Invoice } from 'models/baseModels/Invoice/Invoice';
+import { ModelNameEnum } from 'models/types';
+import { FieldTypeEnum, Schema, TargetField } from 'schemas/types';
+import { getValueMapFromList } from 'utils/index';
+import { TemplateFile } from 'utils/types';
+import { showToast } from './interactive';
+import { PrintValues } from './types';
+import {
+  getDocFromNameIfExistsElseNew,
+  getSavePath,
+  showExportInFolder,
+} from './ui';
+import { Money } from 'pesa';
+import { SalesInvoice } from 'models/baseModels/SalesInvoice/SalesInvoice';
+import { Payment } from 'models/baseModels/Payment/Payment';
+import QRCode from 'qrcode';
+
+export type PrintTemplateHint = {
+  [key: string]: string | PrintTemplateHint | PrintTemplateHint[];
+};
+type PrintTemplateData = Record<string, unknown>;
+type TemplateUpdateItem = {
+  name: string;
+  template: string;
+  type: string;
+  width: number;
+  height: number;
+};
+
+const printSettingsFields = [
+  'logo',
+  'displayLogo',
+  'color',
+  'font',
+  'email',
+  'phone',
+  'address',
+  'companyName',
+  'amountInWords',
+  'displaytermsandconditions',
+  'termsAndConditions',
+  'upiId',
+  'displayPaymentQR',
+];
+const accountingSettingsFields = ['gstin', 'taxId'];
+
+export async function getPrintTemplatePropValues(
+  doc: Doc
+): Promise<PrintValues> {
+  const fyo = doc.fyo;
+  let paymentId;
+  let sinvDoc;
+
+  const values: PrintValues = { doc: {}, print: {} };
+  values.doc = await getPrintTemplateDocValues(doc);
+
+  if (
+    values.doc.entryType === ModelNameEnum.SalesInvoice ||
+    values.doc.entryType === ModelNameEnum.PurchaseInvoice
+  ) {
+    paymentId = await (doc as SalesInvoice).getPaymentIds();
+
+    if (paymentId && paymentId.length) {
+      const paymentDetails = await getPaymentDetails(doc, paymentId);
+      (values.doc as PrintTemplateData).paymentDetails = paymentDetails;
+    }
+  }
+
+  if (doc.referenceType == ModelNameEnum.SalesInvoice) {
+    const referenceName = (doc as Payment)?.for![0]?.referenceName;
+
+    if (referenceName) {
+      sinvDoc = await fyo.doc.getDoc(ModelNameEnum.SalesInvoice, referenceName);
+
+      if (sinvDoc.taxes) {
+        (values.doc as PrintTemplateData).taxes = sinvDoc.taxes;
+      }
+    }
+  }
+
+  let totalTax;
+
+  if (values.doc.entryType !== ModelNameEnum.Shipment) {
+    totalTax = await ((sinvDoc as Invoice) ?? (doc as Payment))?.getTotalTax();
+  }
+
+  if (doc.schema.name == ModelNameEnum.Payment) {
+    (values.doc as PrintTemplateData).amountPaidInWords = getGrandTotalInWords(
+      (doc.amountPaid as Money)?.float
+    );
+  }
+
+  (values.doc as PrintTemplateData).subTotal = doc.fyo.format(
+    ((doc.grandTotal as Money) ?? (doc.amount as Money)).sub(totalTax || 0),
+    ModelNameEnum.Currency
+  );
+
+  const printSettings = await fyo.doc.getDoc(ModelNameEnum.PrintSettings);
+  const printValues = await getPrintTemplateDocValues(
+    printSettings,
+    printSettingsFields
+  );
+
+  const accountingSettings = await fyo.doc.getDoc(
+    ModelNameEnum.AccountingSettings
+  );
+  const accountingValues = await getPrintTemplateDocValues(
+    accountingSettings,
+    accountingSettingsFields
+  );
+
+  values.print = {
+    ...printValues,
+    ...accountingValues,
+  };
+  const discountSchema = ['Invoice', 'Quote'];
+  if (discountSchema.some((value) => doc.schemaName?.endsWith(value))) {
+    (values.doc as PrintTemplateData).totalDiscount =
+      formattedTotalDiscount(doc);
+  }
+  (values.doc as PrintTemplateData).showHSN = showHSN(doc);
+
+  (values.doc as PrintTemplateData).grandTotalInWords = getGrandTotalInWords(
+    ((doc.grandTotal as Money) ?? (doc.amount as Money)).float
+  );
+
+  (values.doc as PrintTemplateData).date = getDate(doc.date as string);
+
+  if (printSettings.displayTime) {
+    (values.doc as PrintTemplateData).time = getTime(doc.date as string);
+  }
+
+  if (printSettings.displayDescription) {
+    (values.doc as PrintTemplateData).description = showDescription(doc);
+  }
+
+  // Generate Offline UPI Payment QR Code
+  const upiId = (printSettings.upiId as string) || (printSettings.phone ? `${String(printSettings.phone).replace(/[^0-9]/g, '')}@upi` : '');
+  if (upiId && printSettings.displayPaymentQR !== false) {
+    const rawTotal = ((doc.grandTotal as Money) ?? (doc.amount as Money))?.float ?? 0;
+    const payeeName = printSettings.companyName || 'KarobarPro Store';
+    const upiUri = `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(String(payeeName))}&am=${rawTotal}&tn=${encodeURIComponent('Invoice ' + String(doc.name || ''))}`;
+    try {
+      const qrDataUrl = await QRCode.toDataURL(upiUri, { width: 220, margin: 1 });
+      (values.doc as PrintTemplateData).paymentQr = qrDataUrl;
+      (values.doc as PrintTemplateData).upiUri = upiUri;
+    } catch {
+      (values.doc as PrintTemplateData).paymentQr = '';
+    }
+  }
+
+  return values;
+}
+async function getPaymentDetails(doc: Doc, paymentId: string[]) {
+  const paymentIds = paymentId.sort();
+  const paymentDetails = [];
+  let outstandingAmount = doc.grandTotal as Money;
+
+  for (const payment of paymentIds) {
+    const paymentDoc = await doc.fyo.doc.getDoc(ModelNameEnum.Payment, payment);
+    outstandingAmount = outstandingAmount.sub(paymentDoc.amount as Money);
+
+    paymentDetails.push({
+      amount: doc.fyo.format(paymentDoc.amount, ModelNameEnum.Currency),
+      amountPaid: doc.fyo.format(paymentDoc.amountPaid, ModelNameEnum.Currency),
+      paymentMethod: paymentDoc.paymentMethod as string,
+      outstandingAmount: doc.fyo.format(
+        outstandingAmount,
+        ModelNameEnum.Currency
+      ),
+    });
+  }
+
+  return paymentDetails;
+}
+
+function getDate(dateString: string): string {
+  const date = new Date(dateString);
+  date.setMonth(date.getMonth());
+
+  return `${date.toLocaleString('default', {
+    month: 'short',
+  })} ${date.getDate()}, ${date.getFullYear()}`;
+}
+
+function getTime(dateString: string): string {
+  const date = new Date(dateString);
+
+  return date.toTimeString().split(' ')[0];
+}
+
+export function getPrintTemplatePropHints(schemaName: string, fyo: Fyo) {
+  const hints: PrintTemplateHint = {};
+  const schema = fyo.schemaMap[schemaName]!;
+  hints.doc = getPrintTemplateDocHints(schema, fyo);
+
+  const printSettingsHints = getPrintTemplateDocHints(
+    fyo.schemaMap[ModelNameEnum.PrintSettings]!,
+    fyo,
+    printSettingsFields
+  );
+  const accountingSettingsHints = getPrintTemplateDocHints(
+    fyo.schemaMap[ModelNameEnum.AccountingSettings]!,
+    fyo,
+    accountingSettingsFields
+  );
+
+  hints.print = {
+    ...printSettingsHints,
+    ...accountingSettingsHints,
+  };
+
+  if (schemaName?.endsWith('Invoice')) {
+    (hints.doc as PrintTemplateData).totalDiscount = fyo.t`Total Discount`;
+    (hints.doc as PrintTemplateData).showHSN = fyo.t`Show HSN`;
+  }
+
+  return hints;
+}
+
+function getGrandTotalInWords(total: number) {
+  const formattedTotal = total.toFixed(2);
+
+  const [integerPart, decimalPart] = formattedTotal.split('.');
+
+  const ones = [
+    '',
+    t`One`,
+    t`Two`,
+    t`Three`,
+    t`Four`,
+    t`Five`,
+    t`Six`,
+    t`Seven`,
+    t`Eight`,
+    t`Nine`,
+  ];
+
+  const teens = [
+    t`Ten`,
+    t`Eleven`,
+    t`Twelve`,
+    t`Thirteen`,
+    t`Fourteen`,
+    t`Fifteen`,
+    t`Sixteen`,
+    t`Seventeen`,
+    t`Eighteen`,
+    t`Nineteen`,
+  ];
+
+  const tens = [
+    '',
+    '',
+    t`Twenty`,
+    t`Thirty`,
+    t`Forty`,
+    t`Fifty`,
+    t`Sixty`,
+    t`Seventy`,
+    t`Eighty`,
+    t`Ninety`,
+  ];
+
+  const scales = ['', t`Thousand`, t`Million`, t`Billion`];
+
+  function convertThreeDigitNumber(num: number) {
+    let result = '';
+
+    const hundredDigit = Math.floor(num / 100);
+    const remainder = num % 100;
+
+    if (hundredDigit > 0) {
+      result += ones[hundredDigit] + ` ${t`Hundred`}`;
+    }
+
+    if (remainder > 0) {
+      if (hundredDigit > 0) {
+        result += ` ${t`And`} `;
+      }
+
+      if (remainder < 10) {
+        result += ones[remainder];
+      } else if (remainder < 20) {
+        result += teens[remainder - 10];
+      } else {
+        const tensDigit = Math.floor(remainder / 10);
+        const onesDigit = remainder % 10;
+        result += tens[tensDigit];
+        if (onesDigit > 0) {
+          result += ' ' + ones[onesDigit];
+        }
+      }
+    }
+
+    return result;
+  }
+
+  let spelledOutInteger = '';
+  const integerGroups = integerPart.match(/(\d{1,3})(?=(\d{3})*$)/g) || [];
+  const groupCount = integerGroups.length;
+
+  integerGroups.forEach((group, index) => {
+    const groupValue = parseInt(group);
+
+    if (groupValue > 0) {
+      const groupText = convertThreeDigitNumber(groupValue);
+      const groupSuffix = scales[groupCount - index - 1];
+      spelledOutInteger +=
+        groupText + (groupSuffix ? ' ' + groupSuffix : '') + ' ';
+    }
+  });
+
+  spelledOutInteger = spelledOutInteger.trim() || t`Zero`;
+
+  let spelledOutDecimal = '';
+  const decimalCents = parseInt(decimalPart);
+
+  if (decimalCents !== 0) {
+    spelledOutDecimal =
+      ` ${t`and`} ` + convertThreeDigitNumber(decimalCents) + ` ${t`Paisa`}`;
+  }
+
+  return `${spelledOutInteger}${spelledOutDecimal} ${t`only`}`;
+}
+
+function showHSN(doc: Doc): boolean {
+  const items = doc.items;
+  if (!Array.isArray(items)) {
+    return false;
+  }
+
+  return items.map((i: Doc) => i.hsnCode).every(Boolean);
+}
+
+function showDescription(doc: Doc): boolean {
+  const description = Array.isArray(doc.items)
+    ? doc.items.map((item: Doc) => item.description).filter(Boolean)
+    : [];
+  return description.length > 0;
+}
+
+function formattedTotalDiscount(doc: Doc): string {
+  if (!(doc instanceof Invoice)) {
+    return '';
+  }
+
+  const totalDiscount = doc.getTotalDiscount();
+  if (!totalDiscount?.float) {
+    return '';
+  }
+
+  return doc.fyo.format(totalDiscount, ModelNameEnum.Currency);
+}
+
+function getPrintTemplateDocHints(
+  schema: Schema,
+  fyo: Fyo,
+  fieldnames?: string[],
+  linkLevel?: number
+): PrintTemplateHint {
+  linkLevel ??= 0;
+  const hints: PrintTemplateHint = {};
+  const links: PrintTemplateHint = {};
+
+  let fields = schema.fields;
+  if (fieldnames) {
+    fields = fields.filter((f) => fieldnames.includes(f.fieldname));
+  }
+
+  for (const field of fields) {
+    const { fieldname, fieldtype, label, meta } = field;
+    if (fieldtype === FieldTypeEnum.Attachment || meta) {
+      continue;
+    }
+
+    hints[fieldname] = label ?? fieldname;
+    const { target } = field as TargetField;
+    const targetSchema = fyo.schemaMap[target];
+    if (fieldtype === FieldTypeEnum.Link && targetSchema && linkLevel < 2) {
+      links[fieldname] = getPrintTemplateDocHints(
+        targetSchema,
+        fyo,
+        undefined,
+        linkLevel + 1
+      );
+    }
+
+    if (fieldtype === FieldTypeEnum.Table && targetSchema) {
+      hints[fieldname] = [getPrintTemplateDocHints(targetSchema, fyo)];
+    }
+  }
+
+  hints.submitted = fyo.t`Submitted`;
+  hints.entryType = fyo.t`Entry Type`;
+  hints.entryLabel = fyo.t`Entry Label`;
+
+  if (Object.keys(links).length) {
+    hints.links = links;
+  }
+  return hints;
+}
+
+async function getPrintTemplateDocValues(doc: Doc, fieldnames?: string[]) {
+  const values: PrintTemplateData = {};
+  if (!(doc instanceof Doc)) {
+    return values;
+  }
+
+  let fields = doc.schema.fields;
+  if (fieldnames) {
+    fields = fields.filter((f) => fieldnames.includes(f.fieldname));
+  }
+
+  // Set Formatted Doc Data
+  for (const field of fields) {
+    const { fieldname, fieldtype, meta } = field;
+    if (fieldtype === FieldTypeEnum.Attachment || meta) {
+      continue;
+    }
+
+    const value = doc.get(fieldname);
+
+    if (!value) {
+      values[fieldname] = '';
+      continue;
+    }
+
+    if (!Array.isArray(value)) {
+      values[fieldname] = doc.fyo.format(value, field, doc);
+      continue;
+    }
+
+    const table: PrintTemplateData[] = [];
+    for (const row of value) {
+      const rowProps = await getPrintTemplateDocValues(row);
+      table.push(rowProps);
+    }
+
+    values[fieldname] = table;
+  }
+
+  values.submitted = doc.submitted;
+  values.entryType = doc.schema.name;
+  values.entryLabel = doc.schema.label;
+
+  // Set Formatted Doc Link Data
+  await doc.loadLinks();
+  const links: PrintTemplateData = {};
+  for (const [linkName, linkDoc] of Object.entries(doc.links ?? {})) {
+    if (fieldnames && !fieldnames.includes(linkName)) {
+      continue;
+    }
+
+    links[linkName] = await getPrintTemplateDocValues(linkDoc);
+  }
+
+  if (Object.keys(links).length) {
+    values.links = links;
+  }
+  return values;
+}
+
+export async function getPathAndMakePDF(
+  name: string,
+  innerHTML: string,
+  width: number,
+  height: number,
+  shouldPrint?: boolean
+) {
+  if (!shouldPrint) {
+    const { filePath: savePath } = await getSavePath(name, 'pdf');
+    if (!savePath) {
+      return;
+    }
+
+    const html = constructPrintDocument(innerHTML);
+    const success = await ipc.makePDF(html, savePath, width, height);
+    if (success) {
+      showExportInFolder(t`Save as PDF Successful`, savePath);
+    } else {
+      showToast({ message: t`Export Failed`, type: 'error' });
+    }
+  } else {
+    const html = constructPrintDocument(innerHTML);
+    const success = await ipc.printDocument(html, width, height);
+    if (success) {
+      showToast({ message: t`Print Successful`, type: 'success' });
+    } else {
+      showToast({ message: t`Print Failed`, type: 'error' });
+    }
+  }
+}
+
+function constructPrintDocument(innerHTML: string) {
+  const html = document.createElement('html');
+  const head = document.createElement('head');
+  const body = document.createElement('body');
+  const style = getAllCSSAsStyleElem();
+
+  const printCSS = document.createElement('style');
+  printCSS.innerHTML = `
+    @media print {
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        background: white;
+      }
+
+      @page {
+        margin: 0;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+    }
+  `;
+
+  head.innerHTML = [
+    '<meta charset="UTF-8">',
+    '<title>Print Window</title>',
+  ].join('\n');
+
+  head.append(style, printCSS);
+
+  body.innerHTML = innerHTML;
+  html.append(head, body);
+  return html.outerHTML;
+}
+
+function getAllCSSAsStyleElem() {
+  const cssTexts: string[] = [];
+  for (const sheet of document.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      cssTexts.push(rule.cssText);
+    }
+
+    if (sheet.ownerRule) {
+      cssTexts.push(sheet.ownerRule.cssText);
+    }
+  }
+
+  const styleElem = document.createElement('style');
+  styleElem.innerHTML = cssTexts.join('\n');
+  return styleElem;
+}
+
+export async function updatePrintTemplates(fyo: Fyo) {
+  const templateFiles = await ipc.getTemplates(
+    fyo.singles.PrintSettings?.posPrintWidth as number
+  );
+  const existingTemplates = (await fyo.db.getAll(ModelNameEnum.PrintTemplate, {
+    fields: ['name', 'modified'],
+    filters: { isCustom: false },
+  })) as { name: string; modified: Date }[];
+
+  const nameModifiedMap = getValueMapFromList(
+    existingTemplates,
+    'name',
+    'modified'
+  );
+
+  const updateList: TemplateUpdateItem[] = [];
+  for (const templateFile of templateFiles) {
+    const updates = getPrintTemplateUpdateList(
+      templateFile,
+      nameModifiedMap,
+      fyo
+    );
+
+    updateList.push(...updates);
+  }
+
+  const isLogging = fyo.store.skipTelemetryLogging;
+  fyo.store.skipTelemetryLogging = true;
+  for (const { name, type, template, width, height } of updateList) {
+    const doc = await getDocFromNameIfExistsElseNew(
+      ModelNameEnum.PrintTemplate,
+      name
+    );
+
+    const updateData = {
+      name,
+      type,
+      template,
+      isCustom: false,
+      ...(width ? { width } : {}),
+      ...(height ? { height } : {}),
+    };
+
+    await doc.set(updateData);
+    await doc.sync();
+  }
+  fyo.store.skipTelemetryLogging = isLogging;
+}
+
+function getPrintTemplateUpdateList(
+  { file, template, modified: modifiedString, width, height }: TemplateFile,
+  nameModifiedMap: Record<string, Date>,
+  fyo: Fyo
+): TemplateUpdateItem[] {
+  const templateList: TemplateUpdateItem[] = [];
+  const dbModified = new Date(modifiedString);
+
+  for (const { name, type } of getNameAndTypeFromTemplateFile(file, fyo)) {
+    const fileModified = nameModifiedMap[name];
+    if (fileModified && dbModified.valueOf() <= fileModified.valueOf()) {
+      continue;
+    }
+
+    templateList.push({
+      height,
+      width,
+      name,
+      type,
+      template,
+    });
+  }
+  return templateList;
+}
+
+function getNameAndTypeFromTemplateFile(
+  file: string,
+  fyo: Fyo
+): { name: string; type: string }[] {
+  /**
+   * Template File Name Format:
+   * TemplateName[.SchemaName].template.html
+   *
+   * If the SchemaName is absent then it is assumed
+   * that the SchemaName is:
+   * - SalesInvoice
+   * - SalesQuote
+   * - PurchaseInvoice
+   */
+
+  const fileName = file.split('.template.html')[0];
+  const name = fileName.split('.')[0];
+  const schemaName = fileName.split('.')[1];
+
+  if (schemaName) {
+    const label = fyo.schemaMap[schemaName]?.label ?? schemaName;
+    return [{ name: `${name} - ${label}`, type: schemaName }];
+  }
+
+  return [
+    ModelNameEnum.SalesInvoice,
+    ModelNameEnum.SalesQuote,
+    ModelNameEnum.PurchaseInvoice,
+  ].map((schemaName) => {
+    const label = fyo.schemaMap[schemaName]?.label ?? schemaName;
+    return { name: `${name} - ${label}`, type: schemaName };
+  });
+}
+
+export const baseTemplate = `<main class="h-full w-full bg-white">
+
+  <!-- Edit This Code -->
+  <header class="p-4 flex justify-between border-b">
+    <h2 
+      class="font-semibold text-2xl" 
+      :style="{ color: print.color }"
+    >
+      {{ print.companyName }}
+    </h2>
+    <h2 class="font-semibold text-2xl" >
+      {{ doc.name }}
+    </h2>
+  </header>
+
+  <div class="p-4 text-gray-600">
+    Edit the code in the Template Editor on the right
+    to create your own personalized custom template.
+  </div>
+
+</main>
+`;
+
+======================================================================
+FILE: src\utils\refs.ts
+======================================================================
+import { reactive, ref } from 'vue';
+import type { HistoryState } from 'vue-router';
+
+export const showSidebar = ref(true);
+export const docsPathRef = ref<string>('');
+export const systemLanguageRef = ref<string>('');
+export const historyState = reactive({
+  forward: !!(history.state as HistoryState)?.forward,
+  back: !!(history.state as HistoryState)?.back,
+});
+
+======================================================================
+FILE: src\utils\search.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { RawValueMap } from 'fyo/core/types';
+import { groupBy } from 'lodash';
+import { ModelNameEnum } from 'models/types';
+import { reports } from 'reports';
+import { OptionField } from 'schemas/types';
+import { createFilters, routeFilters } from 'src/utils/filters';
+import { GetAllOptions } from 'utils/db/types';
+import { safeParseFloat } from 'utils/index';
+import { RouteLocationRaw } from 'vue-router';
+import { fuzzyMatch } from '.';
+import { getFormRoute, routeTo } from './ui';
+import { searchGroups } from '../../utils/types';
+import type { SearchGroup, SearchItem } from '../../utils/types';
+
+export { searchGroups };
+export type { SearchGroup, SearchItem };
+
+interface StoredRecentItem {
+  label: string;
+  group: string;
+  route?: string;
+  schemaName?: string;
+  reportName?: string;
+  initData?: RawValueMap;
+  timestamp: number;
+}
+
+interface DocSearchItem extends Omit<SearchItem, 'group'> {
+  group: 'Docs';
+  schemaLabel: string;
+  more: string[];
+}
+
+interface RecentSearchItem extends Omit<SearchItem, 'group'> {
+  group: 'Recent';
+}
+
+export type SearchItems = (DocSearchItem | SearchItem | RecentSearchItem)[];
+
+interface Searchable {
+  needsUpdate: boolean;
+  schemaName: string;
+  fields: string[];
+  meta: string[];
+  isChild: boolean;
+  isSubmittable: boolean;
+}
+
+interface Keyword {
+  values: string[];
+  meta: Record<string, string | boolean | undefined>;
+  priority: number;
+}
+
+interface SearchFilters {
+  groupFilters: Record<SearchGroup, boolean>;
+  skipTables: boolean;
+  skipTransactions: boolean;
+  schemaFilters: Record<string, boolean>;
+}
+
+interface SearchIntermediate {
+  suggestions: SearchItems;
+  previousInput?: string;
+}
+
+export function getGroupLabelMap() {
+  return {
+    Create: t`Create`,
+    List: t`List`,
+    Report: t`Report`,
+    Docs: t`Docs`,
+    Page: t`Page`,
+    Recent: t`Recent`,
+  };
+}
+
+function getCreateAction(fyo: Fyo, schemaName: string, initData?: RawValueMap) {
+  return async function action() {
+    const doc = fyo.doc.getNewDoc(schemaName, initData);
+    const route = getFormRoute(schemaName, doc.name!);
+    await routeTo(route);
+  };
+}
+
+function getCreateList(fyo: Fyo): SearchItem[] {
+  const hasInventory = fyo.doc.singles.AccountingSettings?.enableInventory;
+  const formEditCreateList = [
+    ModelNameEnum.SalesInvoice,
+    ModelNameEnum.PurchaseInvoice,
+    ModelNameEnum.JournalEntry,
+    ...(hasInventory
+      ? [
+          ModelNameEnum.Shipment,
+          ModelNameEnum.PurchaseReceipt,
+          ModelNameEnum.StockMovement,
+        ]
+      : []),
+  ].map(
+    (schemaName) =>
+      ({
+        label: fyo.schemaMap[schemaName]?.label,
+        group: 'Create',
+        action: getCreateAction(fyo, schemaName),
+        schemaName,
+      } as SearchItem)
+  );
+
+  const filteredCreateList = [
+    {
+      label: t`Sales Payment`,
+      schemaName: ModelNameEnum.Payment,
+      create: createFilters.SalesPayments,
+    },
+    {
+      label: t`Purchase Payment`,
+      schemaName: ModelNameEnum.Payment,
+      create: createFilters.PurchasePayments,
+    },
+    {
+      label: t`Customer`,
+      schemaName: ModelNameEnum.Party,
+      create: createFilters.Customers,
+    },
+    {
+      label: t`Supplier`,
+      schemaName: ModelNameEnum.Party,
+      create: createFilters.Suppliers,
+    },
+    {
+      label: t`Party`,
+      schemaName: ModelNameEnum.Party,
+      create: createFilters.Party,
+    },
+    {
+      label: t`Sales Item`,
+      schemaName: ModelNameEnum.Item,
+      create: createFilters.SalesItems,
+    },
+    {
+      label: t`Purchase Item`,
+      schemaName: ModelNameEnum.Item,
+      create: createFilters.PurchaseItems,
+    },
+    {
+      label: t`Item`,
+      schemaName: ModelNameEnum.Item,
+      create: createFilters.Items,
+    },
+  ].map(({ label, create, schemaName }) => {
+    return {
+      label,
+      group: 'Create',
+      action: getCreateAction(fyo, schemaName, create),
+      schemaName,
+      initData: create,
+    } as SearchItem;
+  });
+
+  return [formEditCreateList, filteredCreateList].flat();
+}
+
+function getReportList(fyo: Fyo): SearchItem[] {
+  const hasGstin = !!fyo.singles?.AccountingSettings?.gstin;
+  const hasInventory = !!fyo.singles?.AccountingSettings?.enableInventory;
+  const reportNames = Object.keys(reports) as (keyof typeof reports)[];
+  return reportNames
+    .filter((r) => {
+      const report = reports[r];
+      if (report.isInventory && !hasInventory) {
+        return false;
+      }
+
+      if (report.title.startsWith('GST') && !hasGstin) {
+        return false;
+      }
+      return true;
+    })
+    .map((r) => {
+      const report = reports[r];
+      return {
+        label: report.title,
+        route: `/report/${r}`,
+        group: 'Report',
+      };
+    });
+}
+
+function getListViewList(fyo: Fyo): SearchItem[] {
+  let schemaNames = [
+    ModelNameEnum.Account,
+    ModelNameEnum.JournalEntry,
+    ModelNameEnum.PurchaseInvoice,
+    ModelNameEnum.SalesInvoice,
+    ModelNameEnum.Tax,
+    ModelNameEnum.UOM,
+    ModelNameEnum.Address,
+    ModelNameEnum.AccountingLedgerEntry,
+    ModelNameEnum.Currency,
+    ModelNameEnum.NumberSeries,
+    ModelNameEnum.PrintTemplate,
+  ];
+
+  if (fyo.doc.singles.AccountingSettings?.enableInventory) {
+    schemaNames.push(
+      ModelNameEnum.StockMovement,
+      ModelNameEnum.Shipment,
+      ModelNameEnum.PurchaseReceipt,
+      ModelNameEnum.Location,
+      ModelNameEnum.StockLedgerEntry
+    );
+  }
+
+  if (fyo.doc.singles.AccountingSettings?.enablePriceList) {
+    schemaNames.push(ModelNameEnum.PriceList);
+  }
+
+  if (fyo.singles.InventorySettings?.enableBatches) {
+    schemaNames.push(ModelNameEnum.Batch);
+  }
+
+  if (fyo.singles.InventorySettings?.enableSerialNumber) {
+    schemaNames.push(ModelNameEnum.SerialNumber);
+  }
+
+  if (fyo.doc.singles.AccountingSettings?.enableFormCustomization) {
+    schemaNames.push(ModelNameEnum.CustomForm);
+  }
+
+  schemaNames = Object.keys(fyo.schemaMap) as ModelNameEnum[];
+
+  const standardLists = schemaNames
+    .map((s) => fyo.schemaMap[s])
+    .filter((s) => s && !s.isChild && !s.isSingle)
+    .map(
+      (s) =>
+        ({
+          label: s!.label,
+          route: `/list/${s!.name}`,
+          group: 'List',
+        } as SearchItem)
+    );
+
+  const filteredLists = [
+    {
+      label: t`Customers`,
+      route: `/list/Party/${t`Customers`}`,
+      filters: routeFilters.Customers,
+    },
+    {
+      label: t`Suppliers`,
+      route: `/list/Party/${t`Suppliers`}`,
+      filters: routeFilters.Suppliers,
+    },
+    {
+      label: t`Party`,
+      route: `/list/Party/${t`Party`}`,
+      filters: routeFilters.Party,
+    },
+    {
+      label: t`Sales Items`,
+      route: `/list/Item/${t`Sales Items`}`,
+      filters: routeFilters.SalesItems,
+    },
+    {
+      label: t`Sales Payments`,
+      route: `/list/Payment/${t`Sales Payments`}`,
+      filters: routeFilters.SalesPayments,
+    },
+    {
+      label: t`Purchase Items`,
+      route: `/list/Item/${t`Purchase Items`}`,
+      filters: routeFilters.PurchaseItems,
+    },
+    {
+      label: t`Items`,
+      route: `/list/Item/${t`Items`}`,
+      filters: routeFilters.Items,
+    },
+    {
+      label: t`Purchase Payments`,
+      route: `/list/Payment/${t`Purchase Payments`}`,
+      filters: routeFilters.PurchasePayments,
+    },
+  ].map((i) => {
+    const label = i.label;
+    const route = encodeURI(`${i.route}?filters=${JSON.stringify(i.filters)}`);
+
+    return { label, route, group: 'List' } as SearchItem;
+  });
+
+  return [standardLists, filteredLists].flat();
+}
+
+function getSetupList(): SearchItem[] {
+  return [
+    {
+      label: t`Dashboard`,
+      route: '/',
+      group: 'Page',
+    },
+    {
+      label: t`Chart of Accounts`,
+      route: '/chart-of-accounts',
+      group: 'Page',
+    },
+    {
+      label: t`Import Wizard`,
+      route: '/import-wizard',
+      group: 'Page',
+    },
+    {
+      label: t`Settings`,
+      route: '/settings',
+      group: 'Page',
+    },
+  ];
+}
+
+function getNonDocSearchList(fyo: Fyo) {
+  return [
+    getListViewList(fyo),
+    getCreateList(fyo),
+    getReportList(fyo),
+    getSetupList(),
+  ]
+    .flat()
+    .map((d) => {
+      if (d.route && !d.action) {
+        d.action = async () => {
+          await routeTo(d.route!);
+        };
+      }
+      return d;
+    });
+}
+
+export class Search {
+  /**
+   * A simple fuzzy searcher.
+   *
+   * How the Search works:
+   * - Pulls `keywordFields` (string columns) from the db.
+   * - `name` or `parent` (parent doc's name) is used as the main
+   *   label.
+   * - The `name`, `keywordFields` and schema label are used as
+   *   search target terms.
+   * - Input is split on `' '` (whitespace) and each part has to completely
+   *   or partially match the search target terms.
+   * - Non matches are ignored.
+   * - Each letter in the input narrows the search using the `this._intermediate`
+   *   object where the incremental searches are stored.
+   * - Search index is marked for updation when a doc is entered or deleted.
+   * - Marked indices are rebuilt when the modal is opened.
+   */
+
+  _obsSet = false;
+  numSearches = 0;
+  recentKey = 'searchRecents';
+  searchables: Record<string, Searchable>;
+  keywords: Record<string, Keyword[]>;
+  priorityMap: Record<string, number> = {
+    [ModelNameEnum.SalesInvoice]: 125,
+    [ModelNameEnum.PurchaseInvoice]: 100,
+    [ModelNameEnum.Payment]: 75,
+    [ModelNameEnum.StockMovement]: 75,
+    [ModelNameEnum.Shipment]: 75,
+    [ModelNameEnum.PurchaseReceipt]: 75,
+    [ModelNameEnum.Item]: 50,
+    [ModelNameEnum.Party]: 50,
+    [ModelNameEnum.JournalEntry]: 50,
+  };
+
+  filters: SearchFilters = {
+    groupFilters: {
+      List: true,
+      Report: true,
+      Create: true,
+      Page: true,
+      Docs: true,
+      Recent: true,
+    },
+    schemaFilters: {},
+    skipTables: false,
+    skipTransactions: false,
+  };
+
+  fyo: Fyo;
+
+  _intermediate: SearchIntermediate = { suggestions: [] };
+
+  _nonDocSearchList: SearchItem[];
+  _groupLabelMap?: Record<SearchGroup, string>;
+
+  maxRecentItems = 10;
+  recentExpiryDays = 30;
+
+  constructor(fyo: Fyo) {
+    this.fyo = fyo;
+    this.keywords = {};
+    this.searchables = {};
+    this._nonDocSearchList = getNonDocSearchList(fyo);
+  }
+
+  /**
+   * these getters are used for hacky two way binding between the
+   * `skipT*` filters and the `schemaFilters`.
+   */
+
+  private _loadAndCleanRecentItems(): StoredRecentItem[] {
+    try {
+      const raw = localStorage.getItem(this.recentKey);
+      return raw ? (JSON.parse(raw) as StoredRecentItem[]) : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  private _saveRecentItems(items: StoredRecentItem[]) {
+    localStorage.setItem(this.recentKey, JSON.stringify(items));
+  }
+
+  addToRecent(item: SearchItems[number]) {
+    const recents = this._loadAndCleanRecentItems();
+
+    const recentItem: StoredRecentItem = {
+      label: item.label,
+      group: item.group,
+      timestamp: Date.now(),
+    };
+
+    if ('route' in item && item.route) {
+      recentItem.route = item.route;
+    } else if (item.group === 'Docs') {
+      recentItem.schemaName = item.schemaLabel;
+    } else if (item.group === 'Create') {
+      recentItem.schemaName = item.schemaName;
+      recentItem.initData = item.initData;
+    }
+
+    const updatedRecents = [
+      recentItem,
+      ...recents.filter((r) => r.label !== recentItem.label),
+    ].slice(0, this.maxRecentItems);
+
+    this._saveRecentItems(updatedRecents);
+  }
+
+  getRecentItems(searchTerm?: string): RecentSearchItem[] {
+    try {
+      const recents = this._loadAndCleanRecentItems();
+
+      let filtered = recents;
+      if (searchTerm) {
+        const lower = searchTerm.toLowerCase();
+        filtered = recents.filter(
+          (item) =>
+            item.label.toLowerCase().includes(lower) ||
+            item.group.toLowerCase().includes(lower)
+        );
+      }
+
+      const result = filtered.map((item) => ({
+        label: item.label,
+        group: 'Recent' as const,
+        action: () => this._executeRecentAction(item),
+        route: item.route,
+      }));
+
+      return result;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  private _executeRecentAction(item: StoredRecentItem) {
+    if (item.route) {
+      void routeTo(item.route);
+    } else if (item.schemaName && item.group === 'Create') {
+      const action = getCreateAction(this.fyo, item.schemaName, item.initData);
+      void action();
+    } else if (item.schemaName) {
+      this._openDocList(item.schemaName);
+    } else if (item.reportName) {
+      this._openReport(item.reportName);
+    }
+  }
+
+  private _openDocList(schemaName: string) {
+    const route = `/list/${schemaName}`;
+    void routeTo(route);
+  }
+
+  private _openReport(reportName: string) {
+    const route = `/report/${reportName}`;
+    void routeTo(route);
+  }
+
+  get skipTables() {
+    let value = true;
+    for (const val of Object.values(this.searchables)) {
+      if (!val.isChild) {
+        continue;
+      }
+
+      value &&= !this.filters.schemaFilters[val.schemaName];
+    }
+    return value;
+  }
+
+  get skipTransactions() {
+    let value = true;
+    for (const val of Object.values(this.searchables)) {
+      if (!val.isSubmittable) {
+        continue;
+      }
+
+      value &&= !this.filters.schemaFilters[val.schemaName];
+    }
+    return value;
+  }
+
+  set(filterName: string, value: boolean) {
+    /**
+     * When a filter is set, intermediate is reset
+     * this way the groups are rebuild with the filters
+     * applied.
+     */
+
+    if (filterName in this.filters.groupFilters) {
+      this.filters.groupFilters[filterName as SearchGroup] = value;
+    } else if (filterName in this.searchables) {
+      this.filters.schemaFilters[filterName] = value;
+      this.filters.skipTables = this.skipTables;
+      this.filters.skipTransactions = this.skipTransactions;
+    } else if (filterName === 'skipTables') {
+      Object.values(this.searchables)
+        .filter(({ isChild }) => isChild)
+        .forEach(({ schemaName }) => {
+          this.filters.schemaFilters[schemaName] = !value;
+        });
+      this.filters.skipTables = value;
+    } else if (filterName === 'skipTransactions') {
+      Object.values(this.searchables)
+        .filter(({ isSubmittable }) => isSubmittable)
+        .forEach(({ schemaName }) => {
+          this.filters.schemaFilters[schemaName] = !value;
+        });
+      this.filters.skipTransactions = value;
+    }
+
+    this._setIntermediate([]);
+  }
+
+  async initializeKeywords() {
+    this._setSearchables();
+    await this.updateKeywords();
+    this._setDocObservers();
+    this._setSchemaFilters();
+    this._groupLabelMap = getGroupLabelMap();
+    this._setFilterDefaults();
+  }
+
+  _setFilterDefaults() {
+    const totalChildKeywords = Object.values(this.searchables)
+      .filter((s) => s.isChild)
+      .map((s) => this.keywords[s.schemaName]?.length ?? 0)
+      .reduce((a, b) => a + b, 0);
+
+    if (totalChildKeywords > 2_000) {
+      this.set('skipTables', true);
+    }
+  }
+
+  _setSchemaFilters() {
+    for (const name in this.searchables) {
+      this.filters.schemaFilters[name] = true;
+    }
+  }
+
+  async updateKeywords() {
+    for (const searchable of Object.values(this.searchables)) {
+      if (!searchable.needsUpdate) {
+        continue;
+      }
+
+      const options: GetAllOptions = {
+        fields: [searchable.fields, searchable.meta].flat(),
+        order: 'desc',
+      };
+
+      if (!searchable.isChild) {
+        options.orderBy = 'modified';
+      }
+
+      const maps = await this.fyo.db.getAllRaw(searchable.schemaName, options);
+      this._setKeywords(maps, searchable);
+      this.searchables[searchable.schemaName].needsUpdate = false;
+    }
+  }
+
+  _searchSuggestions(input: string): SearchItems {
+    const matches: { si: SearchItems[number]; distance: number }[] = [];
+
+    for (const si of this._intermediate.suggestions) {
+      const label = si.label;
+      const groupLabel =
+        (si as DocSearchItem).schemaLabel || this._groupLabelMap?.[si.group];
+      const more = (si as DocSearchItem).more ?? [];
+      const values = [label, more, groupLabel]
+        .flat()
+        .filter(Boolean) as string[];
+
+      const { isMatch, distance } = this._getMatchAndDistance(input, values);
+
+      if (isMatch) {
+        matches.push({ si, distance });
+      }
+    }
+
+    matches.sort((a, b) => a.distance - b.distance);
+    const suggestions = matches.map((m) => m.si);
+    this._setIntermediate(suggestions, input);
+    return suggestions;
+  }
+
+  _shouldUseSuggestions(input?: string): boolean {
+    if (!input) {
+      return false;
+    }
+
+    const { suggestions, previousInput } = this._intermediate;
+    if (!suggestions?.length || !previousInput) {
+      return false;
+    }
+
+    if (!input.startsWith(previousInput)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  _setIntermediate(suggestions: SearchItems, previousInput?: string) {
+    this.numSearches = suggestions.length;
+    this._intermediate.suggestions = suggestions;
+    this._intermediate.previousInput = previousInput;
+  }
+
+  search(input?: string): SearchItems {
+    const useSuggestions = this._shouldUseSuggestions(input);
+    /**
+     * If the suggestion list is already populated
+     * and the input is an extention of the previous
+     * then use the suggestions.
+     */
+    if (useSuggestions) {
+      return this._searchSuggestions(input!);
+    } else {
+      this._setIntermediate([]);
+    }
+
+    /**
+     * Create the suggestion list.
+     */
+    const groupedKeywords = this._getGroupedKeywords();
+    const keys = Object.keys(groupedKeywords);
+    if (!keys.includes('0')) {
+      keys.push('0');
+    }
+
+    keys.sort((a, b) => safeParseFloat(b) - safeParseFloat(a));
+    const array: SearchItems = [];
+
+    const showRecent =
+      !input ||
+      input.startsWith('#') ||
+      input.toLowerCase().startsWith('recent');
+    if (showRecent && this.filters.groupFilters.Recent) {
+      const recentSearchTerm = input?.replace(/^#|recent/gi, '').trim();
+      const recentItems = this.getRecentItems(recentSearchTerm);
+      if (recentItems.length > 0) {
+        array.push(...recentItems);
+      }
+    }
+
+    for (const key of keys) {
+      const keywords = groupedKeywords[key] ?? [];
+      this._pushDocSearchItems(keywords, array, input);
+      if (key === '0') {
+        this._pushNonDocSearchItems(array, input);
+      }
+    }
+
+    this._setIntermediate(array, input);
+    return array;
+  }
+
+  _pushDocSearchItems(keywords: Keyword[], array: SearchItems, input?: string) {
+    if (!input) {
+      return;
+    }
+
+    if (!this.filters.groupFilters.Docs) {
+      return;
+    }
+
+    const subArray = this._getSubSortedArray(keywords, input);
+    array.push(...subArray);
+  }
+
+  _pushNonDocSearchItems(array: SearchItems, input?: string) {
+    const filtered = this._nonDocSearchList.filter(
+      (si) => this.filters.groupFilters[si.group]
+    );
+    const subArray = this._getSubSortedArray(filtered, input);
+    array.push(...subArray);
+  }
+
+  _getSubSortedArray(
+    items: (SearchItem | Keyword)[],
+    input?: string
+  ): SearchItems {
+    const subArray: { item: SearchItems[number]; distance: number }[] = [];
+
+    for (const item of items) {
+      const subArrayItem = this._getSubArrayItem(item, input);
+      if (!subArrayItem) {
+        continue;
+      }
+
+      subArray.push(subArrayItem);
+    }
+
+    subArray.sort((a, b) => a.distance - b.distance);
+    return subArray.map(({ item }) => item);
+  }
+
+  _getSubArrayItem(
+    item: SearchItem | Keyword,
+    input?: string
+  ): { item: SearchItems[number]; distance: number } | null {
+    if (isSearchItem(item)) {
+      return this._getSubArrayItemFromSearchItem(item, input);
+    }
+
+    if (!input) {
+      return null;
+    }
+
+    return this._getSubArrayItemFromKeyword(item, input);
+  }
+
+  _getSubArrayItemFromSearchItem(item: SearchItem, input?: string) {
+    if (!input) {
+      return { item, distance: 0 };
+    }
+
+    const values = this._getValueListFromSearchItem(item).filter(Boolean);
+    const { isMatch, distance } = this._getMatchAndDistance(input, values);
+
+    if (!isMatch) {
+      return null;
+    }
+
+    return { item, distance };
+  }
+
+  _getValueListFromSearchItem({ label, group }: SearchItem): string[] {
+    return [label, group];
+  }
+
+  _getSubArrayItemFromKeyword(item: Keyword, input: string) {
+    const values = this._getValueListFromKeyword(item).filter(Boolean);
+    const { isMatch, distance } = this._getMatchAndDistance(input, values);
+
+    if (!isMatch) {
+      return null;
+    }
+
+    return {
+      item: this._getDocSearchItemFromKeyword(item),
+      distance,
+    };
+  }
+
+  _getValueListFromKeyword({ values, meta }: Keyword): string[] {
+    const schemaLabel = meta.schemaName as string;
+    return [values, schemaLabel].flat();
+  }
+
+  _getMatchAndDistance(input: string, values: string[]) {
+    /**
+     * All the parts should match with something.
+     */
+
+    let distance = Number.MAX_SAFE_INTEGER;
+    for (const part of input.split(' ').filter(Boolean)) {
+      const match = this._getInternalMatch(part, values);
+      if (!match.isMatch) {
+        return { isMatch: false, distance: Number.MAX_SAFE_INTEGER };
+      }
+
+      distance = match.distance < distance ? match.distance : distance;
+    }
+
+    return { isMatch: true, distance };
+  }
+
+  _getInternalMatch(input: string, values: string[]) {
+    let isMatch = false;
+    let distance = Number.MAX_SAFE_INTEGER;
+
+    for (const k of values) {
+      const match = fuzzyMatch(input, k);
+      isMatch ||= match.isMatch;
+
+      if (match.distance < distance) {
+        distance = match.distance;
+      }
+    }
+
+    return { isMatch, distance };
+  }
+
+  _getDocSearchItemFromKeyword(keyword: Keyword): DocSearchItem {
+    const schemaName = keyword.meta.schemaName as string;
+    const schemaLabel = this.fyo.schemaMap[schemaName]?.label ?? schemaName;
+    const route = this._getRouteFromKeyword(keyword);
+    return {
+      label: keyword.values[0],
+      schemaLabel,
+      more: keyword.values.slice(1),
+      group: 'Docs',
+      action: async () => {
+        await routeTo(route);
+      },
+    };
+  }
+
+  _getRouteFromKeyword(keyword: Keyword): RouteLocationRaw {
+    const { parent, parentSchemaName, schemaName } = keyword.meta;
+    if (parent && parentSchemaName) {
+      return getFormRoute(parentSchemaName as string, parent as string);
+    }
+
+    return getFormRoute(schemaName as string, keyword.values[0]);
+  }
+
+  _getGroupedKeywords() {
+    /**
+     * filter out the ignored groups
+     * group by the keyword priority
+     */
+    const keywords: Keyword[] = [];
+    const schemaNames = Object.keys(this.keywords);
+    for (const sn of schemaNames) {
+      const searchable = this.searchables[sn];
+      if (!this.filters.schemaFilters[sn] || !this.filters.groupFilters.Docs) {
+        continue;
+      }
+
+      if (searchable.isChild && this.filters.skipTables) {
+        continue;
+      }
+
+      if (searchable.isSubmittable && this.filters.skipTransactions) {
+        continue;
+      }
+      keywords.push(...this.keywords[sn]);
+    }
+
+    return groupBy(keywords.flat(), 'priority');
+  }
+
+  _setSearchables() {
+    for (const schemaName of Object.keys(this.fyo.schemaMap)) {
+      const schema = this.fyo.schemaMap[schemaName];
+      if (!schema?.keywordFields?.length || this.searchables[schemaName]) {
+        continue;
+      }
+
+      const fields = [...schema.keywordFields];
+      const meta = [];
+      if (schema.isChild) {
+        meta.push('parent', 'parentSchemaName');
+      }
+
+      if (schema.isSubmittable) {
+        meta.push('submitted', 'cancelled');
+      }
+
+      this.searchables[schemaName] = {
+        schemaName,
+        fields,
+        meta,
+        isChild: !!schema.isChild,
+        isSubmittable: !!schema.isSubmittable,
+        needsUpdate: true,
+      };
+    }
+  }
+
+  _setDocObservers() {
+    if (this._obsSet) {
+      return;
+    }
+
+    for (const { schemaName } of Object.values(this.searchables)) {
+      this.fyo.doc.observer.on(`sync:${schemaName}`, () => {
+        this.searchables[schemaName].needsUpdate = true;
+      });
+
+      this.fyo.doc.observer.on(`delete:${schemaName}`, () => {
+        this.searchables[schemaName].needsUpdate = true;
+      });
+    }
+
+    this._obsSet = true;
+  }
+
+  _setKeywords(maps: RawValueMap[], searchable: Searchable) {
+    if (!maps?.length) {
+      return;
+    }
+
+    this.keywords[searchable.schemaName] = [];
+
+    for (const map of maps) {
+      const keyword: Keyword = { values: [], meta: {}, priority: 0 };
+      this._setKeywordValues(map, searchable, keyword);
+      this._setMeta(map, searchable, keyword);
+      this.keywords[searchable.schemaName]!.push(keyword);
+    }
+
+    this._setPriority(searchable);
+  }
+
+  _setKeywordValues(
+    map: RawValueMap,
+    searchable: Searchable,
+    keyword: Keyword
+  ) {
+    // Set individual field values
+    for (const fn of searchable.fields) {
+      let value = map[fn] as string | undefined;
+      const field = this.fyo.getField(searchable.schemaName, fn);
+
+      const { options } = field as OptionField;
+      if (options) {
+        value = options.find((o) => o.value === value)?.label ?? value;
+      }
+
+      keyword.values.push(value ?? '');
+    }
+  }
+
+  _setMeta(map: RawValueMap, searchable: Searchable, keyword: Keyword) {
+    // Set the meta map
+    for (const fn of searchable.meta) {
+      const meta = map[fn];
+      if (typeof meta === 'number') {
+        keyword.meta[fn] = Boolean(meta);
+      } else if (typeof meta === 'string') {
+        keyword.meta[fn] = meta;
+      }
+    }
+
+    keyword.meta.schemaName = searchable.schemaName;
+    if (keyword.meta.parent) {
+      keyword.values.unshift(keyword.meta.parent as string);
+    }
+  }
+
+  _setPriority(searchable: Searchable) {
+    const keywords = this.keywords[searchable.schemaName] ?? [];
+    const basePriority = this.priorityMap[searchable.schemaName] ?? 0;
+
+    for (const k of keywords) {
+      k.priority += basePriority;
+
+      if (k.meta.submitted) {
+        k.priority += 25;
+      }
+
+      if (k.meta.cancelled) {
+        k.priority -= 200;
+      }
+
+      if (searchable.isChild) {
+        k.priority -= 150;
+      }
+    }
+  }
+}
+
+function isSearchItem(item: SearchItem | Keyword): item is SearchItem {
+  return !!(item as SearchItem).group;
+}
+
+======================================================================
+FILE: src\utils\shortcuts.ts
+======================================================================
+import { Keys } from 'utils/types';
+import { watch } from 'vue';
+import { getIsMac } from './misc';
+
+interface ModMap {
+  alt: boolean;
+  ctrl: boolean;
+  meta: boolean;
+  shift: boolean;
+  repeat: boolean;
+}
+
+type Mod = keyof ModMap;
+type Context = unknown;
+type ShortcutFunction = () => unknown;
+type ShortcutConfig = {
+  callback: ShortcutFunction;
+  propagate: boolean;
+};
+
+type ShortcutMap = Map<Context, Map<string, ShortcutConfig>>;
+
+const mods: Readonly<Mod[]> = ['alt', 'ctrl', 'meta', 'repeat', 'shift'];
+
+/**
+ * Used to add shortcuts based on **context**.
+ *
+ * **Context** is a identifier for where the shortcut belongs. For instance
+ * a _Form_ component having shortcuts for _Submit Form_.
+ *
+ * In the above example an app can have multiple instances of the _Form_
+ * component active at the same time, so the passed context should be a
+ * unique identifier such as the component object.
+ *
+ * If only one instance of a component is meant to be active at a time
+ * (for example a _Sidebar_ component) then do not use objects, use some
+ * primitive datatype (`string`).
+ */
+export class Shortcuts {
+  keys: Keys;
+  isMac: boolean;
+  shortcuts: ShortcutMap;
+  modMap: Partial<Record<Mod, boolean>>;
+  keySet: Set<string>;
+
+  constructor(keys: Keys) {
+    this.modMap = {};
+    this.keySet = new Set();
+    this.keys = keys;
+    this.shortcuts = new Map();
+    this.isMac = getIsMac();
+
+    watch(this.keys, (keys) => {
+      const key = this.getKey(Array.from(keys.pressed), keys);
+      if (!key) {
+        return false;
+      }
+
+      if (!key || !this.keySet.has(key)) {
+        return;
+      }
+
+      this.#trigger(key);
+    });
+  }
+
+  #trigger(key: string) {
+    const configList = Array.from(this.shortcuts.keys())
+      .map((cxt) => this.shortcuts.get(cxt)?.get(key))
+      .filter(Boolean)
+      .reverse() as ShortcutConfig[];
+
+    for (const config of configList) {
+      config.callback();
+      if (!config.propagate) {
+        break;
+      }
+    }
+  }
+
+  /**
+   * Check if a context is present or if a shortcut
+   * is present in a context.
+   *
+   * @param context context in which the shortcut is to be checked
+   * @param shortcut shortcut that is to be checked
+   * @returns boolean indicating presence
+   */
+  has(context: Context, shortcut?: string[]): boolean {
+    if (!shortcut) {
+      return this.shortcuts.has(context);
+    }
+
+    const contextualShortcuts = this.shortcuts.get(context);
+    if (!contextualShortcuts) {
+      return false;
+    }
+
+    const key = this.getKey(shortcut);
+    if (!key) {
+      return false;
+    }
+
+    return contextualShortcuts.has(key);
+  }
+
+  /**
+   * Assign a function to a shortcut in a given context.
+   *
+   * @param context context object to which the shortcut belongs
+   * @param shortcut keyboard event codes used as shortcut chord
+   * @param callback function to be called when the shortcut is pressed
+   * @param propagate whether to check and execute shortcuts in earlier contexts
+   * @param removeIfSet whether to delete the set shortcut
+   */
+  set(
+    context: Context,
+    shortcut: string[],
+    callback: ShortcutFunction,
+    propagate = false,
+    removeIfSet = true
+  ): void {
+    const key = this.getKey(shortcut);
+    if (!key) {
+      return;
+    }
+
+    let contextualShortcuts = this.shortcuts.get(context);
+
+    /**
+     * Maintain context order.
+     */
+    if (!contextualShortcuts) {
+      contextualShortcuts = new Map();
+    } else {
+      this.shortcuts.delete(contextualShortcuts);
+    }
+
+    if (contextualShortcuts.has(key) && !removeIfSet) {
+      this.shortcuts.set(context, contextualShortcuts);
+      throw new Error(`Shortcut ${key} already exists.`);
+    }
+
+    this.keySet.add(key);
+    contextualShortcuts.set(key, { callback, propagate });
+    this.shortcuts.set(context, contextualShortcuts);
+  }
+
+  /**
+   * Either delete a single shortcut or all the shortcuts in
+   * a given context.
+   *
+   * @param context context from which the shortcut is to be removed
+   * @param shortcut shortcut that is to be deleted
+   * @returns boolean indicating success
+   */
+  delete(context: Context, shortcut?: string[]): boolean {
+    if (!shortcut) {
+      return this.shortcuts.delete(context);
+    }
+
+    const contextualShortcuts = this.shortcuts.get(context);
+    if (!contextualShortcuts) {
+      return false;
+    }
+
+    const key = this.getKey(shortcut);
+    if (!key) {
+      return false;
+    }
+
+    return contextualShortcuts.delete(key);
+  }
+
+  /**
+   * Converts shortcuts list and modMap to a string to be
+   * used as a shortcut key.
+   *
+   * @param shortcut array of shortcut keys
+   * @param modMap boolean map of mod keys to be used
+   * @returns string to be used as the shortcut Map key
+   */
+  getKey(shortcut: string[], modMap?: Partial<ModMap>): string | null {
+    const _modMap = modMap || this.modMap;
+    this.modMap = {};
+
+    const shortcutString = shortcut.sort().join('+');
+    const modString = mods.filter((k) => _modMap[k]).join('+');
+    if (shortcutString && modString) {
+      return modString + '+' + shortcutString;
+    }
+
+    if (!modString) {
+      return shortcutString;
+    }
+
+    if (!shortcutString) {
+      return modString;
+    }
+
+    return null;
+  }
+
+  /**
+   * Shortcut Modifiers
+   */
+  get alt() {
+    this.modMap['alt'] = true;
+    return this;
+  }
+
+  get ctrl() {
+    this.modMap['ctrl'] = true;
+    return this;
+  }
+
+  get meta() {
+    this.modMap['meta'] = true;
+    return this;
+  }
+
+  get shift() {
+    this.modMap['shift'] = true;
+    return this;
+  }
+
+  get pmodShift() {
+    this.modMap['meta'] = true;
+    this.modMap['shift'] = true;
+    return this;
+  }
+
+  get repeat() {
+    this.modMap['repeat'] = true;
+    return this;
+  }
+
+  get pmod() {
+    if (this.isMac) {
+      return this.meta;
+    }
+
+    return this.ctrl;
+  }
+}
+
+======================================================================
+FILE: src\utils\sidebarConfig.ts
+======================================================================
+import { t } from 'fyo';
+import { routeFilters } from 'src/utils/filters';
+import { fyo } from '../initFyo';
+import { SidebarConfig, SidebarItem, SidebarRoot } from './types';
+
+export function getSidebarConfig(): SidebarConfig {
+  const sideBar = getCompleteSidebar();
+  return getFilteredSidebar(sideBar);
+}
+
+function getFilteredSidebar(sideBar: SidebarConfig): SidebarConfig {
+  return sideBar.filter((root) => {
+    root.items = root.items?.filter((item) => {
+      if (item.hidden !== undefined) {
+        return !item.hidden();
+      }
+
+      return true;
+    });
+
+    if (root.hidden !== undefined) {
+      return !root.hidden();
+    }
+
+    return true;
+  });
+}
+
+function getRegionalSidebar(): SidebarRoot[] {
+  const hasGstin = !!fyo.singles?.AccountingSettings?.gstin;
+  if (!hasGstin) {
+    return [];
+  }
+
+  return [
+    {
+      label: t`GST`,
+      name: 'gst',
+      icon: 'gst',
+      route: '/report/GSTR1',
+      items: [
+        {
+          label: t`GSTR1`,
+          name: 'gstr1',
+          route: '/report/GSTR1',
+        },
+        {
+          label: t`GSTR2`,
+          name: 'gstr2',
+          route: '/report/GSTR2',
+        },
+      ],
+    },
+  ];
+}
+
+function getInventorySidebar(): SidebarRoot[] {
+  const hasInventory = !!fyo.singles.AccountingSettings?.enableInventory;
+  if (!hasInventory) {
+    return [];
+  }
+
+  return [
+    {
+      label: t`Inventory`,
+      name: 'inventory',
+      icon: 'inventory',
+      iconSize: '18',
+      route: '/list/StockMovement',
+      items: [
+        {
+          label: t`Stock Movement`,
+          name: 'stock-movement',
+          route: '/list/StockMovement',
+          schemaName: 'StockMovement',
+        },
+        {
+          label: t`Shipment`,
+          name: 'shipment',
+          route: '/list/Shipment',
+          schemaName: 'Shipment',
+        },
+        {
+          label: t`Purchase Receipt`,
+          name: 'purchase-receipt',
+          route: '/list/PurchaseReceipt',
+          schemaName: 'PurchaseReceipt',
+        },
+        {
+          label: t`Stock Ledger`,
+          name: 'stock-ledger',
+          route: '/report/StockLedger',
+        },
+        {
+          label: t`Stock Balance`,
+          name: 'stock-balance',
+          route: '/report/StockBalance',
+        },
+      ],
+    },
+  ];
+}
+
+function getPOSSidebar() {
+  return {
+    label: t`POS`,
+    name: 'pos',
+    route: '/pos',
+    icon: 'pos',
+    hidden: () => !fyo.singles.InventorySettings?.enablePointOfSale,
+  };
+}
+
+function getReportSidebar() {
+  return {
+    label: t`Reports`,
+    name: 'reports',
+    icon: 'reports',
+    route: '/report/GeneralLedger',
+    items: [
+      {
+        label: t`General Ledger`,
+        name: 'general-ledger',
+        route: '/report/GeneralLedger',
+      },
+      {
+        label: t`Profit And Loss`,
+        name: 'profit-and-loss',
+        route: '/report/ProfitAndLoss',
+      },
+      {
+        label: t`Balance Sheet`,
+        name: 'balance-sheet',
+        route: '/report/BalanceSheet',
+      },
+      {
+        label: t`Trial Balance`,
+        name: 'trial-balance',
+        route: '/report/TrialBalance',
+      },
+    ],
+  };
+}
+
+function getCompleteSidebar(): SidebarConfig {
+  return [
+    {
+      label: t`Get Started`,
+      name: 'get-started',
+      route: '/get-started',
+      icon: 'general',
+      iconSize: '24',
+      iconHeight: 5,
+      hidden: () => !!fyo.singles.SystemSettings?.hideGetStarted,
+    },
+    {
+      label: t`Dashboard`,
+      name: 'dashboard',
+      route: '/',
+      icon: 'dashboard',
+    },
+    {
+      label: t`Khata Book`,
+      name: 'khata',
+      route: '/khata',
+      icon: 'customer',
+    },
+    {
+      label: t`Sales`,
+      name: 'sales',
+      icon: 'sales',
+      route: '/list/SalesInvoice',
+      items: [
+        {
+          label: t`Sales Quotes`,
+          name: 'sales-quotes',
+          route: '/list/SalesQuote',
+          schemaName: 'SalesQuote',
+        },
+        {
+          label: t`Sales Invoices`,
+          name: 'sales-invoices',
+          route: '/list/SalesInvoice',
+          schemaName: 'SalesInvoice',
+        },
+        {
+          label: t`Sales Payments`,
+          name: 'payments',
+          route: `/list/Payment/${t`Sales Payments`}`,
+          schemaName: 'Payment',
+          filters: routeFilters.SalesPayments,
+        },
+        {
+          label: t`Customers`,
+          name: 'customers',
+          route: `/list/Party/${t`Customers`}`,
+          schemaName: 'Party',
+          filters: routeFilters.Customers,
+        },
+        {
+          label: t`Sales Items`,
+          name: 'sales-items',
+          route: `/list/Item/${t`Sales Items`}`,
+          schemaName: 'Item',
+          filters: routeFilters.SalesItems,
+        },
+        {
+          label: t`Loyalty Program`,
+          name: 'loyalty-program',
+          route: '/list/LoyaltyProgram',
+          schemaName: 'LoyaltyProgram',
+          hidden: () => !fyo.singles.AccountingSettings?.enableLoyaltyProgram,
+        },
+        {
+          label: t`Lead`,
+          name: 'lead',
+          route: '/list/Lead',
+          schemaName: 'Lead',
+          hidden: () => !fyo.singles.AccountingSettings?.enableLead,
+        },
+        {
+          label: t`Pricing Rule`,
+          name: 'pricing-rule',
+          route: '/list/PricingRule',
+          schemaName: 'PricingRule',
+          hidden: () => !fyo.singles.AccountingSettings?.enablePricingRule,
+        },
+        {
+          label: t`Coupon Code`,
+          name: 'coupon-code',
+          route: `/list/CouponCode`,
+          schemaName: 'CouponCode',
+          hidden: () => !fyo.singles.AccountingSettings?.enableCouponCode,
+        },
+      ] as SidebarItem[],
+    },
+    {
+      label: t`Purchases`,
+      name: 'purchases',
+      icon: 'purchase',
+      route: '/list/PurchaseInvoice',
+      items: [
+        {
+          label: t`Purchase Invoices`,
+          name: 'purchase-invoices',
+          route: '/list/PurchaseInvoice',
+          schemaName: 'PurchaseInvoice',
+        },
+        {
+          label: t`Purchase Payments`,
+          name: 'payments',
+          route: `/list/Payment/${t`Purchase Payments`}`,
+          schemaName: 'Payment',
+          filters: routeFilters.PurchasePayments,
+        },
+        {
+          label: t`Suppliers`,
+          name: 'suppliers',
+          route: `/list/Party/${t`Suppliers`}`,
+          schemaName: 'Party',
+          filters: routeFilters.Suppliers,
+        },
+        {
+          label: t`Purchase Items`,
+          name: 'purchase-items',
+          route: `/list/Item/${t`Purchase Items`}`,
+          schemaName: 'Item',
+          filters: routeFilters.PurchaseItems,
+        },
+      ] as SidebarItem[],
+    },
+    {
+      label: t`Common`,
+      name: 'common-entries',
+      icon: 'common-entries',
+      route: '/list/JournalEntry',
+      items: [
+        {
+          label: t`Journal Entry`,
+          name: 'journal-entry',
+          route: '/list/JournalEntry',
+          schemaName: 'JournalEntry',
+        },
+        {
+          label: t`Party`,
+          name: 'party',
+          route: '/list/Party',
+          schemaName: 'Party',
+          filters: { role: ['in', ['Customer', 'Supplier', 'Both']] },
+        },
+        {
+          label: t`Items`,
+          name: 'common-items',
+          route: `/list/Item/${t`Items`}`,
+          schemaName: 'Item',
+          filters: { for: 'Both' },
+        },
+        {
+          label: t`Price List`,
+          name: 'price-list',
+          route: '/list/PriceList',
+          schemaName: 'PriceList',
+          hidden: () => !fyo.singles.AccountingSettings?.enablePriceList,
+        },
+      ] as SidebarItem[],
+    },
+    getReportSidebar(),
+    getInventorySidebar(),
+    getPOSSidebar(),
+    getRegionalSidebar(),
+    {
+      label: t`Setup`,
+      name: 'setup',
+      icon: 'settings',
+      route: '/chart-of-accounts',
+      items: [
+        {
+          label: t`Chart of Accounts`,
+          name: 'chart-of-accounts',
+          route: '/chart-of-accounts',
+        },
+        {
+          label: t`Tax Templates`,
+          name: 'taxes',
+          route: '/list/Tax',
+          schemaName: 'Tax',
+        },
+        {
+          label: t`Import Wizard`,
+          name: 'import-wizard',
+          route: '/import-wizard',
+        },
+        {
+          label: t`Print Templates`,
+          name: 'print-template',
+          route: `/list/PrintTemplate/${t`Print Templates`}`,
+        },
+        {
+          label: t`Customize Form`,
+          name: 'customize-form',
+          // route: `/customize-form`,
+          route: `/list/CustomForm/${t`Customize Form`}`,
+          hidden: () =>
+            !fyo.singles.AccountingSettings?.enableFormCustomization,
+        },
+        {
+          label: t`Settings`,
+          name: 'settings',
+          route: '/settings',
+        },
+      ] as SidebarItem[],
+    },
+  ].flat();
+}
+
+======================================================================
+FILE: src\utils\theme.ts
+======================================================================
+export function setDarkMode(darkMode: boolean): void {
+  if (darkMode) {
+    document.documentElement.classList.add(
+      'dark',
+      'custom-scroll',
+      'custom-scroll-thumb1'
+    );
+    return;
+  }
+  document.documentElement.classList.remove('dark');
+}
+
+======================================================================
+FILE: src\utils\types.ts
+======================================================================
+import type { Doc } from 'fyo/model/doc';
+import type { Action } from 'fyo/model/types';
+import type { ModelNameEnum } from 'models/types';
+import type { Field, FieldType } from 'schemas/types';
+import type { QueryFilter } from 'utils/db/types';
+import type { Ref } from 'vue';
+import type { toastDurationMap } from './ui';
+
+export type DocRef<D extends Doc = Doc> = Ref<D | null>;
+
+export type ToastType = 'info' | 'warning' | 'error' | 'success';
+export type ToastDuration = keyof typeof toastDurationMap;
+
+export interface MessageDialogButton {
+  label: string;
+  action: () => Promise<unknown> | unknown;
+}
+
+export interface MessageDialogOptions {
+  message: string;
+  detail?: string;
+  buttons?: MessageDialogButton[];
+}
+
+export interface ToastOptions {
+  message: string;
+  type?: ToastType;
+  duration?: ToastDuration;
+  action?: () => void;
+  actionText?: string;
+}
+
+export type WindowAction = 'close' | 'minimize' | 'maximize' | 'unmaximize';
+export type SettingsTab =
+  | ModelNameEnum.AccountingSettings
+  | ModelNameEnum.Defaults
+  | ModelNameEnum.PrintSettings
+  | ModelNameEnum.SystemSettings;
+
+export interface QuickEditOptions {
+  doc: Doc;
+  hideFields?: string[];
+  showFields?: string[];
+  defaults?: Record<string, unknown>;
+}
+
+export type SidebarConfig = SidebarRoot[];
+export interface SidebarRoot {
+  label: string;
+  name: string;
+  route: string;
+  icon: string;
+  iconSize?: string;
+  iconHeight?: number;
+  hidden?: () => boolean;
+  items?: SidebarItem[];
+  filters?: QueryFilter;
+}
+
+export interface SidebarItem {
+  label: string;
+  name: string;
+  route: string;
+  schemaName?: string;
+  hidden?: () => boolean;
+  filters?: QueryFilter;
+}
+
+export interface ExportField {
+  fieldname: string;
+  fieldtype: FieldType;
+  label: string;
+  export: boolean;
+}
+
+export interface ExportTableField {
+  fieldname: string;
+  label: string;
+  target: string;
+  fields: ExportField[];
+}
+
+export type ActionGroup = {
+  group: string;
+  label: string;
+  type: string;
+  actions: Action[];
+};
+
+export type DropdownItem = {
+  label: string;
+  value?: string;
+  action?: () => unknown;
+  group?: string;
+  component?: { template: string };
+  isGroup?: boolean;
+};
+
+export type UIGroupedFields = Map<string, Map<string, Field[]>>;
+export type ExportFormat = 'csv' | 'json';
+export type PeriodKey = 'This Year' | 'This Quarter' | 'This Month' | 'YTD';
+
+export type PrintValues = {
+  print: Record<string, unknown>;
+  doc: Record<string, unknown>;
+};
+
+export interface DialogOptions {
+  title: string;
+  type?: ToastType;
+  detail?: string | string[];
+  buttons?: DialogButton[];
+}
+
+export type DialogButton = {
+  label: string;
+  action: () => unknown;
+  isPrimary?: boolean;
+  isEscape?: boolean;
+};
+
+export type GetStartedConfigItem = {
+  label: string;
+  items: {
+    key: string;
+    label: string;
+    icon: string;
+    description: string;
+    fieldname: string;
+    documentation?: string;
+    action?: () => void;
+  }[];
+};
+
+======================================================================
+FILE: src\utils\ui.ts
+======================================================================
+/**
+ * Utils to do UI stuff such as opening dialogs, toasts, etc.
+ * Basically anything that may directly or indirectly import a Vue file.
+ */
+import { t } from 'fyo';
+import type { Doc } from 'fyo/model/doc';
+import { Action } from 'fyo/model/types';
+import { getActions } from 'fyo/utils';
+import {
+  BaseError,
+  getDbError,
+  LinkValidationError,
+  ValueError,
+} from 'fyo/utils/errors';
+import { Invoice } from 'models/baseModels/Invoice/Invoice';
+import { PurchaseInvoice } from 'models/baseModels/PurchaseInvoice/PurchaseInvoice';
+import { SalesInvoice } from 'models/baseModels/SalesInvoice/SalesInvoice';
+import { getLedgerLink } from 'models/helpers';
+import { Transfer } from 'models/inventory/Transfer';
+import { Transactional } from 'models/Transactional/Transactional';
+import { ModelNameEnum } from 'models/types';
+import { Schema } from 'schemas/types';
+import { handleErrorWithDialog } from 'src/errorHandling';
+import { fyo } from 'src/initFyo';
+import router from 'src/router';
+import { assertIsType } from 'utils/index';
+import { SelectFileOptions } from 'utils/types';
+import { RouteLocationRaw } from 'vue-router';
+import { evaluateHidden } from './doc';
+import { showDialog, showToast } from './interactive';
+import { showSidebar } from './refs';
+import {
+  ActionGroup,
+  QuickEditOptions,
+  SettingsTab,
+  ToastOptions,
+  UIGroupedFields,
+} from './types';
+
+export const toastDurationMap = {
+  short: 2_500,
+  long: 5_000,
+  very_long: Infinity,
+} as const;
+
+export async function openQuickEdit({
+  doc,
+  hideFields = [],
+  showFields = [],
+}: QuickEditOptions) {
+  const { schemaName, name } = doc;
+  if (!name) {
+    throw new ValueError(t`Quick edit error: ${schemaName} entry has no name.`);
+  }
+
+  if (router.currentRoute.value.query.name === name) {
+    return;
+  }
+
+  const query = {
+    edit: 1,
+    name,
+    schemaName,
+    showFields,
+    hideFields,
+  };
+  await router.push({ query });
+}
+
+export async function openSettings(tab: SettingsTab) {
+  await routeTo({ path: '/settings', query: { tab } });
+}
+
+export async function routeTo(route: RouteLocationRaw) {
+  if (
+    typeof route === 'string' &&
+    route === router.currentRoute.value.fullPath
+  ) {
+    return;
+  }
+
+  return await router.push(route);
+}
+
+export async function deleteDocWithPrompt(doc: Doc) {
+  const schemaLabel = fyo.schemaMap[doc.schemaName]!.label;
+  let detail = t`This action is permanent.`;
+  if (doc.isTransactional && doc.isSubmitted) {
+    detail = t`This action is permanent and will delete associated ledger entries.`;
+  }
+
+  return (await showDialog({
+    title: t`Delete ${getDocReferenceLabel(doc)}?`,
+    detail,
+    type: 'warning',
+    buttons: [
+      {
+        label: t`Yes`,
+        async action() {
+          try {
+            await doc.delete();
+          } catch (err) {
+            if (getDbError(err as Error) === LinkValidationError) {
+              await showDialog({
+                title: t`Delete Failed`,
+                detail: t`Cannot delete ${schemaLabel} "${doc.name!}" because of linked entries.`,
+                type: 'error',
+              });
+            } else {
+              await handleErrorWithDialog(err as Error, doc);
+            }
+
+            return false;
+          }
+
+          return true;
+        },
+        isPrimary: true,
+      },
+      {
+        label: t`No`,
+        action() {
+          return false;
+        },
+        isEscape: true,
+      },
+    ],
+  })) as boolean;
+}
+
+export async function cancelDocWithPrompt(doc: Doc) {
+  let detail = t`This action is permanent`;
+  if (['SalesInvoice', 'PurchaseInvoice'].includes(doc.schemaName)) {
+    const payments = (
+      await fyo.db.getAll('Payment', {
+        fields: ['name'],
+        filters: { cancelled: false },
+      })
+    ).map(({ name }) => name);
+
+    const query = (
+      await fyo.db.getAll('PaymentFor', {
+        fields: ['parent'],
+        filters: {
+          referenceName: doc.name!,
+        },
+      })
+    ).filter(({ parent }) => payments.includes(parent));
+
+    const paymentList = [...new Set(query.map(({ parent }) => parent))];
+
+    if (paymentList.length === 1) {
+      detail = t`This action is permanent and will cancel the following payment: ${
+        paymentList[0] as string
+      }`;
+    } else if (paymentList.length > 1) {
+      detail = t`This action is permanent and will cancel the following payments: ${paymentList.join(
+        ', '
+      )}`;
+    }
+  }
+
+  return (await showDialog({
+    title: t`Cancel ${getDocReferenceLabel(doc)}?`,
+    detail,
+    type: 'warning',
+    buttons: [
+      {
+        label: t`Yes`,
+        async action() {
+          try {
+            await doc.cancel();
+          } catch (err) {
+            await handleErrorWithDialog(err as Error, doc);
+            return false;
+          }
+
+          return true;
+        },
+        isPrimary: true,
+      },
+      {
+        label: t`No`,
+        action() {
+          return false;
+        },
+        isEscape: true,
+      },
+    ],
+  })) as boolean;
+}
+
+export function getActionsForDoc(doc?: Doc): Action[] {
+  if (!doc) return [];
+
+  const actions: Action[] = [
+    ...getActions(doc),
+    getDuplicateAction(doc),
+    getNewAction(doc),
+    getDeleteAction(doc),
+    getCancelAction(doc),
+  ];
+
+  if (doc?.schemaName === 'Party') {
+    const viewActions = getViewActions(doc);
+    actions.push(...viewActions);
+  }
+
+  return actions
+    .filter((d) => d.condition?.(doc) ?? true)
+    .map((d) => {
+      return {
+        group: d.group,
+        label: d.label,
+        component: d.component,
+        action: d.action,
+      };
+    });
+}
+
+export function getGroupedActionsForDoc(doc?: Doc): ActionGroup[] {
+  const actions = getActionsForDoc(doc);
+  const actionsMap = actions.reduce((acc, ac) => {
+    if (!ac.group) {
+      ac.group = '';
+    }
+
+    acc[ac.group] ??= {
+      group: ac.group,
+      label: ac.label ?? '',
+      type: ac.type ?? 'secondary',
+      actions: [],
+    };
+
+    acc[ac.group].actions.push(ac);
+    return acc;
+  }, {} as Record<string, ActionGroup>);
+
+  const grouped = Object.keys(actionsMap)
+    .filter(Boolean)
+    .sort()
+    .map((k) => actionsMap[k]);
+
+  return [grouped, actionsMap['']].flat().filter(Boolean);
+}
+
+function getViewActions(doc: Doc): Action[] {
+  const actions: Action[] = [
+    {
+      label: t`General Ledger`,
+      group: t`View`,
+      condition: (doc: Doc) => doc.schemaName === 'Party',
+      action: async () => {
+        await router.push({
+          path: '/report/GeneralLedger',
+          query: {
+            defaultFilters: JSON.stringify({
+              party: doc.name,
+            }),
+          },
+        });
+      },
+    },
+  ];
+  return actions;
+}
+
+function getCancelAction(doc: Doc): Action {
+  return {
+    label: t`Cancel`,
+    component: {
+      template: '<span class="text-red-700">{{ t`Cancel` }}</span>',
+    },
+    condition: (doc: Doc) => doc.canCancel,
+    async action() {
+      await commonDocCancel(doc);
+    },
+  };
+}
+
+function getDeleteAction(doc: Doc): Action {
+  return {
+    label: t`Delete`,
+    component: {
+      template: '<span class="text-red-700">{{ t`Delete` }}</span>',
+    },
+    condition: (doc: Doc) => doc.canDelete,
+    async action() {
+      await commongDocDelete(doc);
+    },
+  };
+}
+
+async function openEdit({ name, schemaName }: Doc) {
+  if (!name) {
+    return;
+  }
+
+  const route = getFormRoute(schemaName, name);
+  return await routeTo(route);
+}
+
+function getDuplicateAction(doc: Doc): Action {
+  const isSubmittable = !!doc.schema.isSubmittable;
+  return {
+    label: t`Duplicate`,
+    group: t`Create`,
+    condition: (doc: Doc) =>
+      !!(
+        ((isSubmittable && doc.submitted) || !isSubmittable) &&
+        !doc.notInserted
+      ),
+    async action() {
+      try {
+        const dupe = doc.duplicate();
+        await openEdit(dupe);
+      } catch (err) {
+        await handleErrorWithDialog(err as Error, doc);
+      }
+    },
+  };
+}
+
+function getNewAction(doc: Doc): Action {
+  return {
+    label: t`New Entry`,
+    group: t`Create`,
+    async action() {
+      try {
+        const newDoc = fyo.doc.getNewDoc(doc.schemaName);
+        await openEdit(newDoc);
+      } catch (err) {
+        await handleErrorWithDialog(err as Error, doc);
+      }
+    },
+  };
+}
+
+export function getFieldsGroupedByTabAndSection(
+  schema: Schema,
+  doc: Doc
+): UIGroupedFields {
+  const grouped: UIGroupedFields = new Map();
+  for (const field of schema?.fields ?? []) {
+    const tab = field.tab ?? 'Main';
+    const section = field.section ?? 'Default';
+    if (!grouped.has(tab)) {
+      grouped.set(tab, new Map());
+    }
+
+    const tabbed = grouped.get(tab)!;
+    if (!tabbed.has(section)) {
+      tabbed.set(section, []);
+    }
+
+    if (field.meta) {
+      continue;
+    }
+
+    if (evaluateHidden(field, doc)) {
+      continue;
+    }
+
+    tabbed.get(section)!.push(field);
+  }
+
+  // Delete empty tabs and sections
+  for (const tkey of grouped.keys()) {
+    const section = grouped.get(tkey);
+    if (!section) {
+      grouped.delete(tkey);
+      continue;
+    }
+
+    for (const skey of section.keys()) {
+      const fields = section.get(skey);
+      if (!fields || !fields.length) {
+        section.delete(skey);
+      }
+    }
+
+    if (!section?.size) {
+      grouped.delete(tkey);
+    }
+  }
+
+  return grouped;
+}
+
+export function getFormRoute(
+  schemaName: string,
+  name: string
+): RouteLocationRaw {
+  const route = fyo.models[schemaName]
+    ?.getListViewSettings(fyo)
+    ?.formRoute?.(name);
+
+  if (typeof route === 'string') {
+    return route;
+  }
+
+  // Use `encodeURIComponent` if more name issues
+  return `/edit/${schemaName}/${name.replaceAll('/', '%2F')}`;
+}
+
+export async function getDocFromNameIfExistsElseNew(
+  schemaName: string,
+  name?: string
+) {
+  if (!name) {
+    return fyo.doc.getNewDoc(schemaName);
+  }
+
+  try {
+    return await fyo.doc.getDoc(schemaName, name);
+  } catch {
+    return fyo.doc.getNewDoc(schemaName);
+  }
+}
+
+export async function isPrintable(schemaName: string) {
+  const numTemplates = await fyo.db.count(ModelNameEnum.PrintTemplate, {
+    filters: { type: schemaName },
+  });
+  return numTemplates > 0;
+}
+
+export function toggleSidebar(value?: boolean) {
+  if (typeof value !== 'boolean') {
+    value = !showSidebar.value;
+  }
+
+  showSidebar.value = value;
+}
+
+export function focusOrSelectFormControl(
+  doc: Doc,
+  ref: unknown,
+  shouldClear = true
+) {
+  if (!doc?.fyo) {
+    return;
+  }
+
+  const naming = doc.fyo.schemaMap[doc.schemaName]?.naming;
+  if (naming !== 'manual' || doc.inserted) {
+    return;
+  }
+
+  if (!doc.fyo.doc.isTemporaryName(doc.name ?? '', doc.schema)) {
+    return;
+  }
+
+  if (Array.isArray(ref) && ref.length > 0) {
+    ref = ref[0];
+  }
+
+  if (
+    !ref ||
+    typeof ref !== 'object' ||
+    !assertIsType<Record<string, () => void>>(ref)
+  ) {
+    return;
+  }
+
+  if (!shouldClear && typeof ref?.select === 'function') {
+    ref.select();
+    return;
+  }
+
+  if (typeof ref?.clear === 'function') {
+    ref.clear();
+  }
+
+  if (typeof ref?.focus === 'function') {
+    ref.focus();
+  }
+
+  doc.name = '';
+}
+
+export async function selectTextFile(filters?: SelectFileOptions['filters']) {
+  const options = {
+    title: t`Select File`,
+    filters,
+  };
+  const { success, canceled, filePath, data, name } = await ipc.selectFile(
+    options
+  );
+
+  if (canceled || !success) {
+    showToast({
+      type: 'error',
+      message: t`File selection failed`,
+    });
+    return {};
+  }
+
+  const text = new TextDecoder().decode(data);
+  if (!text) {
+    showToast({
+      type: 'error',
+      message: t`Empty file selected`,
+    });
+
+    return {};
+  }
+
+  return { text, filePath, name };
+}
+
+export enum ShortcutKey {
+  enter = 'enter',
+  ctrl = 'ctrl',
+  pmod = 'pmod',
+  shift = 'shift',
+  alt = 'alt',
+  delete = 'delete',
+  esc = 'esc',
+}
+
+export function getShortcutKeyMap(
+  platform: string
+): Record<ShortcutKey, string> {
+  if (platform === 'Mac') {
+    return {
+      [ShortcutKey.alt]: 'âŒ¥',
+      [ShortcutKey.ctrl]: 'âŒƒ',
+      [ShortcutKey.pmod]: 'âŒ˜',
+      [ShortcutKey.shift]: 'shift',
+      [ShortcutKey.delete]: 'delete',
+      [ShortcutKey.esc]: 'esc',
+      [ShortcutKey.enter]: 'return',
+    };
+  }
+  return {
+    [ShortcutKey.alt]: 'Alt',
+    [ShortcutKey.ctrl]: 'Ctrl',
+    [ShortcutKey.pmod]: 'Ctrl',
+    [ShortcutKey.shift]: 'â‡§',
+    [ShortcutKey.delete]: 'Backspace',
+    [ShortcutKey.esc]: 'Esc',
+    [ShortcutKey.enter]: 'Enter',
+  };
+}
+
+export async function commongDocDelete(
+  doc: Doc,
+  routeBack = true
+): Promise<boolean> {
+  const res = await deleteDocWithPrompt(doc);
+  if (!res) {
+    return false;
+  }
+
+  showActionToast(doc, 'delete');
+  if (routeBack) {
+    router.back();
+  }
+  return true;
+}
+
+export async function commonDocCancel(doc: Doc): Promise<boolean> {
+  const res = await cancelDocWithPrompt(doc);
+  if (!res) {
+    return false;
+  }
+
+  showActionToast(doc, 'cancel');
+  return true;
+}
+
+export async function commonDocSync(
+  doc: Doc,
+  useDialog = false
+): Promise<boolean> {
+  let success: boolean;
+  if (useDialog) {
+    success = !!(await showSubmitOrSyncDialog(doc, 'sync'));
+  } else {
+    success = await syncWithoutDialog(doc);
+  }
+
+  if (!success) {
+    return false;
+  }
+
+  showActionToast(doc, 'sync');
+  return true;
+}
+
+async function syncWithoutDialog(doc: Doc): Promise<boolean> {
+  try {
+    await doc.sync();
+  } catch (error) {
+    await handleErrorWithDialog(error, doc);
+    return false;
+  }
+
+  return true;
+}
+
+export async function commonDocSubmit(doc: Doc): Promise<boolean> {
+  let success = true;
+  if (
+    doc instanceof SalesInvoice &&
+    fyo.singles.AccountingSettings?.enableInventory
+  ) {
+    success = await showInsufficientInventoryDialog(doc);
+  }
+
+  if (!success) {
+    return false;
+  }
+
+  success = await showSubmitOrSyncDialog(doc, 'submit');
+  if (!success) {
+    return false;
+  }
+
+  showSubmitToast(doc);
+  return true;
+}
+
+async function showInsufficientInventoryDialog(doc: SalesInvoice) {
+  const insufficient: { item: string; quantity: number }[] = [];
+  for (const { item, quantity, batch } of doc.items ?? []) {
+    if (!item || typeof quantity !== 'number') {
+      continue;
+    }
+
+    const isTracked = await fyo.getValue(ModelNameEnum.Item, item, 'trackItem');
+    if (!isTracked) {
+      continue;
+    }
+
+    const stockQuantity =
+      (await fyo.db.getStockQuantity(
+        item,
+        undefined,
+        undefined,
+        doc.date!.toISOString(),
+        batch
+      )) ?? 0;
+
+    if (stockQuantity > quantity) {
+      continue;
+    }
+
+    insufficient.push({ item, quantity: quantity - stockQuantity });
+  }
+
+  if (insufficient.length) {
+    const buttons = [
+      {
+        label: t`Yes`,
+        action: () => true,
+        isPrimary: true,
+      },
+      {
+        label: t`No`,
+        action: () => false,
+        isEscape: true,
+      },
+    ];
+
+    const list = insufficient
+      .map(({ item, quantity }) => `${item} (${quantity})`)
+      .join(', ');
+    const detail = [
+      t`The following items have insufficient quantity for Shipment: ${list}`,
+      t`Continue submitting Sales Invoice?`,
+    ];
+
+    return (await showDialog({
+      title: t`Insufficient Quantity`,
+      type: 'warning',
+      detail,
+      buttons,
+    })) as boolean;
+  }
+
+  return true;
+}
+
+async function showSubmitOrSyncDialog(doc: Doc, type: 'submit' | 'sync') {
+  const label = getDocReferenceLabel(doc);
+  let title = t`Save ${label}?`;
+  if (type === 'submit') {
+    title = t`Submit ${label}?`;
+  }
+
+  let detail: string;
+  if (type === 'submit') {
+    detail = getDocSubmitMessage(doc);
+  } else {
+    detail = getDocSyncMessage(doc);
+  }
+
+  const yesAction = async () => {
+    try {
+      await doc[type]();
+    } catch (error) {
+      await handleErrorWithDialog(error, doc);
+      return false;
+    }
+
+    return true;
+  };
+
+  const buttons = [
+    {
+      label: t`Yes`,
+      action: yesAction,
+      isPrimary: true,
+    },
+    {
+      label: t`No`,
+      action: () => false,
+      isEscape: true,
+    },
+  ];
+
+  const dialogOptions = {
+    title,
+    detail,
+    buttons,
+  };
+
+  return (await showDialog(dialogOptions)) as boolean;
+}
+
+function getDocSyncMessage(doc: Doc): string {
+  const label = getDocReferenceLabel(doc);
+  const detail = t`Create new ${doc.schema.label} entry?`;
+  if (doc.inserted) {
+    return t`Save changes made to ${label}?`;
+  }
+
+  if (doc instanceof Invoice && doc.grandTotal?.isZero()) {
+    const gt = doc.fyo.format(doc.grandTotal ?? doc.fyo.pesa(0), 'Currency');
+    return [
+      detail,
+      t`Entry has Grand Total ${gt}. Please verify amounts.`,
+    ].join(' ');
+  }
+
+  return detail;
+}
+
+function getDocSubmitMessage(doc: Doc): string {
+  const details = [t`Mark ${doc.schema.label} as submitted?`];
+
+  if (doc instanceof SalesInvoice && doc.makeAutoPayment) {
+    const toAccount = doc.autoPaymentAccount!;
+    const fromAccount = doc.account!;
+    const amount = fyo.format(doc.outstandingAmount, 'Currency');
+
+    details.push(
+      t`Payment of ${amount} will be made from account "${fromAccount}" to account "${toAccount}" on Submit.`
+    );
+  } else if (doc instanceof PurchaseInvoice && doc.makeAutoPayment) {
+    const fromAccount = doc.autoPaymentAccount!;
+    const toAccount = doc.account!;
+    const amount = fyo.format(doc.outstandingAmount, 'Currency');
+
+    details.push(
+      t`Payment of ${amount} will be made from account "${fromAccount}" to account "${toAccount}" on Submit.`
+    );
+  }
+
+  return details.join(' ');
+}
+
+function showActionToast(doc: Doc, type: 'sync' | 'cancel' | 'delete') {
+  const label = getDocReferenceLabel(doc);
+  const message = {
+    sync: t`${label} saved`,
+    cancel: t`${label} cancelled`,
+    delete: t`${label} deleted`,
+  }[type];
+
+  showToast({ type: 'success', message, duration: 'short' });
+}
+
+function showSubmitToast(doc: Doc) {
+  const label = getDocReferenceLabel(doc);
+  const message = t`${label} submitted`;
+  const toastOption: ToastOptions = {
+    type: 'success',
+    message,
+    duration: 'long',
+    ...getSubmitSuccessToastAction(doc),
+  };
+  showToast(toastOption);
+}
+
+function getSubmitSuccessToastAction(doc: Doc) {
+  const isStockTransfer = doc instanceof Transfer;
+  const isTransactional = doc instanceof Transactional;
+
+  if (isStockTransfer) {
+    return {
+      async action() {
+        const route = getLedgerLink(doc, 'StockLedger');
+        await routeTo(route);
+      },
+      actionText: t`View Stock Entries`,
+    };
+  }
+
+  if (isTransactional) {
+    return {
+      async action() {
+        const route = getLedgerLink(doc, 'GeneralLedger');
+        await routeTo(route);
+      },
+      actionText: t`View Accounting Entries`,
+    };
+  }
+
+  return {};
+}
+
+export function showCannotSaveOrSubmitToast(doc: Doc) {
+  const label = getDocReferenceLabel(doc);
+  let message = t`${label} already saved`;
+
+  if (doc.schema.isSubmittable && doc.isSubmitted) {
+    message = t`${label} already submitted`;
+  }
+
+  showToast({ type: 'warning', message, duration: 'short' });
+}
+
+export function showCannotCancelOrDeleteToast(doc: Doc) {
+  const label = getDocReferenceLabel(doc);
+  let message = t`${label} cannot be deleted`;
+  if (doc.schema.isSubmittable && !doc.isCancelled) {
+    message = t`${label} cannot be cancelled`;
+  }
+
+  showToast({ type: 'warning', message, duration: 'short' });
+}
+
+function getDocReferenceLabel(doc: Doc) {
+  const label = doc.schema.label || doc.schemaName;
+  if (doc.schema.naming === 'random') {
+    return label;
+  }
+
+  return doc.name || label;
+}
+
+export const printSizes = [
+  'A0',
+  'A1',
+  'A2',
+  'A3',
+  'A4',
+  'A5',
+  'A6',
+  'A7',
+  'A8',
+  'A9',
+  'B0',
+  'B1',
+  'B2',
+  'B3',
+  'B4',
+  'B5',
+  'B6',
+  'B7',
+  'B8',
+  'B9',
+  'POS',
+  'Letter',
+  'Legal',
+  'Executive',
+  'C5E',
+  'Comm10',
+  'DLE',
+  'Folio',
+  'Ledger',
+  'Tabloid',
+  'Custom',
+] as const;
+
+export const paperSizeMap: Record<
+  typeof printSizes[number],
+  { width: number; height: number }
+> = {
+  A0: {
+    width: 84.1,
+    height: 118.9,
+  },
+  A1: {
+    width: 59.4,
+    height: 84.1,
+  },
+  A2: {
+    width: 42,
+    height: 59.4,
+  },
+  A3: {
+    width: 29.7,
+    height: 42,
+  },
+  A4: {
+    width: 21,
+    height: 29.7,
+  },
+  A5: {
+    width: 14.8,
+    height: 21,
+  },
+  A6: {
+    width: 10.5,
+    height: 14.8,
+  },
+  A7: {
+    width: 7.4,
+    height: 10.5,
+  },
+  A8: {
+    width: 5.2,
+    height: 7.4,
+  },
+  A9: {
+    width: 3.7,
+    height: 5.2,
+  },
+  B0: {
+    width: 100,
+    height: 141.4,
+  },
+  B1: {
+    width: 70.7,
+    height: 100,
+  },
+  B2: {
+    width: 50,
+    height: 70.7,
+  },
+  B3: {
+    width: 35.3,
+    height: 50,
+  },
+  B4: {
+    width: 25,
+    height: 35.3,
+  },
+  B5: {
+    width: 17.6,
+    height: 25,
+  },
+  B6: {
+    width: 12.5,
+    height: 17.6,
+  },
+  B7: {
+    width: 8.8,
+    height: 12.5,
+  },
+  B8: {
+    width: 6.2,
+    height: 8.8,
+  },
+  B9: {
+    width: 4.4,
+    height: 6.2,
+  },
+  POS: {
+    width: 8,
+    height: 22,
+  },
+  Letter: {
+    width: 21.59,
+    height: 27.94,
+  },
+  Legal: {
+    width: 21.59,
+    height: 35.56,
+  },
+  Executive: {
+    width: 19.05,
+    height: 25.4,
+  },
+  C5E: {
+    width: 16.3,
+    height: 22.9,
+  },
+  Comm10: {
+    width: 10.5,
+    height: 24.1,
+  },
+  DLE: {
+    width: 11,
+    height: 22,
+  },
+  Folio: {
+    width: 21,
+    height: 33,
+  },
+  Ledger: {
+    width: 43.2,
+    height: 27.9,
+  },
+  Tabloid: {
+    width: 27.9,
+    height: 43.2,
+  },
+  Custom: {
+    width: -1,
+    height: -1,
+  },
+};
+
+export function showExportInFolder(message: string, filePath: string) {
+  showToast({
+    message,
+    actionText: t`Open Folder`,
+    type: 'success',
+    action: () => {
+      ipc.showItemInFolder(filePath);
+    },
+  });
+}
+
+export async function deleteDb(filePath: string) {
+  const { error } = await ipc.deleteFile(filePath);
+
+  if (error?.code === 'EBUSY') {
+    await showDialog({
+      title: t`Delete Failed`,
+      detail: t`Please restart and try again.`,
+      type: 'error',
+    });
+  } else if (error?.code === 'ENOENT') {
+    await showDialog({
+      title: t`Delete Failed`,
+      detail: t`File ${filePath} does not exist.`,
+      type: 'error',
+    });
+  } else if (error?.code === 'EPERM') {
+    await showDialog({
+      title: t`Cannot Delete`,
+      detail: t`Close KarobarPro and try manually.`,
+      type: 'error',
+    });
+  } else if (error) {
+    const err = new BaseError(500, error.message);
+    err.name = error.name;
+    err.stack = error.stack;
+    throw err;
+  }
+}
+
+export async function getSelectedFilePath() {
+  return ipc.getOpenFilePath({
+    title: t`Select file`,
+    properties: ['openFile'],
+    filters: [{ name: 'SQLite DB File', extensions: ['db'] }],
+  });
+}
+
+export async function getSavePath(name: string, extention: string) {
+  const response = await ipc.getSaveFilePath({
+    title: t`Select folder`,
+    defaultPath: `${name}.${extention}`,
+  });
+
+  const canceled = response.canceled;
+  let filePath = response.filePath;
+
+  if (filePath && !filePath.endsWith(extention) && filePath !== ':memory:') {
+    filePath = `${filePath}.${extention}`;
+  }
+
+  return { canceled, filePath };
+}
+
+======================================================================
+FILE: src\utils\vueUtils.ts
+======================================================================
+import { Keys } from 'utils/types';
+import {
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+} from 'vue';
+import { getIsMac } from './misc';
+import { Shortcuts } from './shortcuts';
+import { DocRef } from './types';
+import {
+  commonDocCancel,
+  commonDocSubmit,
+  commonDocSync,
+  commongDocDelete,
+  showCannotCancelOrDeleteToast,
+  showCannotSaveOrSubmitToast,
+} from './ui';
+
+export function useKeys() {
+  const isMac = getIsMac();
+  const keys: Keys = reactive({
+    pressed: new Set<string>(),
+    alt: false,
+    ctrl: false,
+    meta: false,
+    shift: false,
+    repeat: false,
+  });
+
+  const keydownListener = (e: KeyboardEvent) => {
+    const notMods = !(e.altKey || e.metaKey || e.ctrlKey);
+    if (e.target instanceof HTMLInputElement && notMods) {
+      return;
+    }
+
+    if (
+      e.target instanceof HTMLElement &&
+      e.target.contentEditable === 'true' &&
+      notMods
+    ) {
+      return;
+    }
+
+    keys.alt = e.altKey;
+    keys.ctrl = e.ctrlKey;
+    keys.meta = e.metaKey;
+    keys.shift = e.shiftKey;
+    keys.repeat = e.repeat;
+
+    const { code } = e;
+    if (
+      code.startsWith('Alt') ||
+      code.startsWith('Control') ||
+      code.startsWith('Meta') ||
+      code.startsWith('Shift')
+    ) {
+      return;
+    }
+
+    keys.pressed.add(code);
+  };
+
+  const keyupListener = (e: KeyboardEvent) => {
+    const { code } = e;
+    if (code.startsWith('Meta') && isMac) {
+      keys.alt = false;
+      keys.ctrl = false;
+      keys.meta = false;
+      keys.shift = false;
+      keys.repeat = false;
+      keys.pressed.clear();
+      return;
+    }
+
+    keys.pressed.delete(code);
+  };
+
+  onMounted(() => {
+    window.addEventListener('keydown', keydownListener);
+    window.addEventListener('keyup', keyupListener);
+  });
+
+  onUnmounted(() => {
+    window.removeEventListener('keydown', keydownListener);
+    window.removeEventListener('keyup', keyupListener);
+  });
+
+  return keys;
+}
+
+export function useMouseLocation() {
+  const loc = ref({ clientX: 0, clientY: 0 });
+
+  const mousemoveListener = (e: MouseEvent) => {
+    loc.value.clientX = e.clientX;
+    loc.value.clientY = e.clientY;
+  };
+
+  onMounted(() => {
+    window.addEventListener('mousemove', mousemoveListener);
+  });
+  onUnmounted(() => {
+    window.removeEventListener('mousemove', mousemoveListener);
+  });
+
+  return loc;
+}
+
+export function useDocShortcuts(
+  shortcuts: Shortcuts,
+  docRef: DocRef,
+  name: string,
+  isMultiple = true
+) {
+  let context = name;
+  if (isMultiple) {
+    context = name + '-' + Math.random().toString(36).slice(2, 6);
+  }
+
+  const syncOrSubmitCallback = async () => {
+    const doc = docRef.value;
+    if (!doc) {
+      return;
+    }
+
+    if (doc.canSave) {
+      return await commonDocSync(doc, true);
+    }
+
+    if (doc.canSubmit) {
+      return await commonDocSubmit(doc);
+    }
+
+    showCannotSaveOrSubmitToast(doc);
+  };
+
+  const cancelOrDeleteCallback = async () => {
+    const doc = docRef.value;
+    if (!doc) {
+      return;
+    }
+
+    if (doc.canCancel) {
+      return await commonDocCancel(doc);
+    }
+
+    if (doc.canDelete) {
+      return await commongDocDelete(doc);
+    }
+
+    showCannotCancelOrDeleteToast(doc);
+  };
+
+  onMounted(() => {
+    if (isMultiple && shortcuts.has(context)) {
+      return;
+    }
+
+    shortcuts.pmod.set(context, ['KeyS'], syncOrSubmitCallback, false);
+    shortcuts.pmod.set(context, ['Backspace'], cancelOrDeleteCallback, false);
+  });
+
+  onActivated(() => {
+    if (isMultiple && shortcuts.has(context)) {
+      return;
+    }
+
+    shortcuts.pmod.set(context, ['KeyS'], syncOrSubmitCallback, false);
+    shortcuts.pmod.set(context, ['Backspace'], cancelOrDeleteCallback, false);
+  });
+
+  onDeactivated(() => {
+    if (!shortcuts.has(context)) {
+      return;
+    }
+
+    shortcuts.delete(context);
+  });
+
+  onUnmounted(() => {
+    if (!shortcuts.has(context)) {
+      return;
+    }
+
+    shortcuts.delete(context);
+  });
+
+  return context;
+}
+

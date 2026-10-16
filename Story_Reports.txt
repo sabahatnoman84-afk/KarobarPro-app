@@ -1,0 +1,4140 @@
+﻿
+=== FOLDER STRUCTURE ===
+reports\BalanceSheet
+reports\GeneralLedger
+reports\GoodsAndServiceTax
+reports\inventory
+reports\ProfitAndLoss
+reports\TrialBalance
+
+=== FILE CONTENTS ===
+======================================================================
+FILE: reports\AccountReport.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { cloneDeep } from 'lodash';
+import { DateTime } from 'luxon';
+import { AccountRootType } from 'models/baseModels/Account/types';
+import { isCredit } from 'models/helpers';
+import { ModelNameEnum } from 'models/types';
+import { LedgerReport } from 'reports/LedgerReport';
+import {
+  Account,
+  AccountList,
+  AccountListNode,
+  AccountNameValueMapMap,
+  AccountTree,
+  AccountTreeNode,
+  BasedOn,
+  ColumnField,
+  DateRange,
+  GroupedMap,
+  LedgerEntry,
+  Periodicity,
+  ReportCell,
+  ReportData,
+  ReportRow,
+  Tree,
+  TreeNode,
+  ValueMap,
+} from 'reports/types';
+import { Field } from 'schemas/types';
+import { getMapFromList } from 'utils';
+import { QueryFilter } from 'utils/db/types';
+
+export const ACC_NAME_WIDTH = 2;
+export const ACC_BAL_WIDTH = 1.25;
+
+export abstract class AccountReport extends LedgerReport {
+  toDate?: string;
+  count = 3;
+  fromYear?: number;
+  toYear?: number;
+  consolidateColumns = false;
+  hideGroupAmounts = false;
+  periodicity: Periodicity = 'Monthly';
+  basedOn: BasedOn = 'Until Date';
+
+  _rawData: LedgerEntry[] = [];
+  _dateRanges?: DateRange[];
+
+  accountMap?: Record<string, Account>;
+
+  async setDefaultFilters(): Promise<void> {
+    if (this.basedOn === 'Until Date' && !this.toDate) {
+      this.toDate = DateTime.now().plus({ days: 1 }).toISODate();
+    }
+
+    if (this.basedOn === 'Fiscal Year' && !this.toYear) {
+      this.fromYear = DateTime.now().year;
+      this.toYear = this.fromYear + 1;
+    }
+
+    await this._setDateRanges();
+  }
+
+  async _setDateRanges() {
+    this._dateRanges = await this._getDateRanges();
+  }
+
+  getRootNodes(
+    rootType: AccountRootType,
+    accountTree: AccountTree
+  ): AccountTreeNode[] | undefined {
+    const rootNodeList = Object.values(accountTree);
+    return rootNodeList.filter((n) => n.rootType === rootType);
+  }
+
+  getEmptyRow(): ReportRow {
+    const columns = this.getColumns();
+    return {
+      isEmpty: true,
+      cells: columns.map(
+        (c) =>
+          ({
+            value: '',
+            rawValue: '',
+            width: c.width,
+            align: 'left',
+          } as ReportCell)
+      ),
+    };
+  }
+
+  getTotalNode(rootNodes: AccountTreeNode[], name: string): AccountListNode {
+    const accountTree: Tree = {};
+    for (const rootNode of rootNodes) {
+      accountTree[rootNode.name] = rootNode;
+    }
+    const leafNodes = getListOfLeafNodes(accountTree) as AccountTreeNode[];
+
+    const totalMap = leafNodes.reduce((acc, node) => {
+      for (const key of this._dateRanges!) {
+        const bal = acc.get(key)?.balance ?? 0;
+        const val = node.valueMap?.get(key)?.balance ?? 0;
+        acc.set(key, { balance: bal + val });
+      }
+
+      return acc;
+    }, new Map() as ValueMap);
+
+    return { name, valueMap: totalMap, level: 0 } as AccountListNode;
+  }
+
+  getReportRowsFromAccountList(accountList: AccountList): ReportData {
+    return accountList.map((al) => {
+      return this.getRowFromAccountListNode(al);
+    });
+  }
+
+  getRowFromAccountListNode(al: AccountListNode) {
+    const nameCell = {
+      value: al.name,
+      rawValue: al.name,
+      align: 'left',
+      width: ACC_NAME_WIDTH,
+      bold: !al.level,
+      indent: al.level ?? 0,
+    } as ReportCell;
+
+    const balanceCells = this._dateRanges!.map((k) => {
+      const rawValue = al.valueMap?.get(k)?.balance ?? 0;
+      let value = this.fyo.format(rawValue, 'Currency');
+      if (this.hideGroupAmounts && al.isGroup) {
+        value = '';
+      }
+
+      return {
+        rawValue,
+        value,
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      } as ReportCell;
+    });
+
+    return {
+      cells: [nameCell, balanceCells].flat(),
+      level: al.level,
+      isGroup: !!al.isGroup,
+      folded: false,
+      foldedBelow: false,
+    } as ReportRow;
+  }
+
+  async _getGroupedByDateRanges(
+    map: GroupedMap
+  ): Promise<AccountNameValueMapMap> {
+    const accountValueMap: AccountNameValueMapMap = new Map();
+    if (!this.accountMap) {
+      await this._setAndReturnAccountMap();
+    }
+
+    for (const account of map.keys()) {
+      const valueMap: ValueMap = new Map();
+
+      /**
+       * Set Balance for every DateRange key
+       */
+      for (const entry of map.get(account)!) {
+        const key = this._getRangeMapKey(entry);
+        if (key === null) {
+          continue;
+        }
+
+        if (!this.accountMap?.[entry.account]) {
+          await this._setAndReturnAccountMap(true);
+        }
+
+        const totalBalance = valueMap.get(key)?.balance ?? 0;
+        const balance = (entry.debit ?? 0) - (entry.credit ?? 0);
+        const rootType = this.accountMap![entry.account]?.rootType;
+
+        if (isCredit(rootType)) {
+          valueMap.set(key, { balance: totalBalance - balance });
+        } else {
+          valueMap.set(key, { balance: totalBalance + balance });
+        }
+      }
+      accountValueMap.set(account, valueMap);
+    }
+
+    return accountValueMap;
+  }
+
+  async _getAccountTree(rangeGroupedMap: AccountNameValueMapMap) {
+    const accountTree = cloneDeep(
+      await this._setAndReturnAccountMap()
+    ) as AccountTree;
+
+    setPruneFlagOnAccountTreeNodes(accountTree);
+    setValueMapOnAccountTreeNodes(accountTree, rangeGroupedMap);
+    setChildrenOnAccountTreeNodes(accountTree);
+    deleteNonRootAccountTreeNodes(accountTree);
+    pruneAccountTree(accountTree);
+
+    return accountTree;
+  }
+
+  async _setAndReturnAccountMap(force = false) {
+    if (this.accountMap && !force) {
+      return this.accountMap;
+    }
+
+    const accountList: Account[] = (
+      await this.fyo.db.getAllRaw('Account', {
+        fields: ['name', 'rootType', 'isGroup', 'parentAccount'],
+      })
+    ).map((rv) => ({
+      name: rv.name as string,
+      rootType: rv.rootType as AccountRootType,
+      isGroup: Boolean(rv.isGroup),
+      parentAccount: rv.parentAccount as string | null,
+    }));
+
+    this.accountMap = getMapFromList(accountList, 'name');
+    return this.accountMap;
+  }
+
+  _getRangeMapKey(entry: LedgerEntry): DateRange | null {
+    const entryDate = DateTime.fromISO(
+      entry.date!.toISOString().split('T')[0]
+    ).toMillis();
+
+    for (const dr of this._dateRanges!) {
+      const toDate = dr.toDate.toMillis();
+      const fromDate = dr.fromDate.toMillis();
+
+      if (entryDate >= fromDate && entryDate < toDate) {
+        return dr;
+      }
+    }
+
+    return null;
+  }
+
+  // Fix arythmetic on dates when adding or substracting months. If the
+  // reference date was the last day in month, ensure that the resulting date is
+  // also the last day.
+  _fixMonthsJump(refDate: DateTime, date: DateTime): DateTime {
+    if (refDate.day == refDate.daysInMonth && date.day != date.daysInMonth) {
+      return date.set({ day: date.daysInMonth });
+    } else {
+      return date;
+    }
+  }
+
+  async _getDateRanges(): Promise<DateRange[]> {
+    const endpoints = await this._getFromAndToDates();
+    const fromDate = DateTime.fromISO(endpoints.fromDate);
+    const toDate = DateTime.fromISO(endpoints.toDate);
+
+    if (this.consolidateColumns) {
+      return [
+        {
+          toDate,
+          fromDate,
+        },
+      ];
+    }
+
+    const months: number = monthsMap[this.periodicity];
+    const dateRanges: DateRange[] = [
+      {
+        toDate,
+        fromDate: this._fixMonthsJump(toDate, toDate.minus({ months })),
+      },
+    ];
+
+    let count = this.count ?? 1;
+    if (this.basedOn === 'Fiscal Year') {
+      count = Math.ceil(((this.toYear! - this.fromYear!) * 12) / months);
+    }
+
+    for (let i = 1; i < count; i++) {
+      const lastRange = dateRanges.at(-1)!;
+      dateRanges.push({
+        toDate: lastRange.fromDate,
+        fromDate: this._fixMonthsJump(
+          toDate,
+          lastRange.fromDate.minus({ months })
+        ),
+      });
+    }
+
+    return dateRanges.sort((b, a) => b.toDate.toMillis() - a.toDate.toMillis());
+  }
+
+  async _getFromAndToDates() {
+    let toDate: string;
+    let fromDate: string;
+
+    if (this.basedOn === 'Until Date') {
+      toDate = DateTime.fromISO(this.toDate!).plus({ days: 1 }).toISODate();
+      const months = monthsMap[this.periodicity] * Math.max(this.count ?? 1, 1);
+      fromDate = DateTime.fromISO(this.toDate!).minus({ months }).toISODate();
+    } else {
+      const fy = await getFiscalEndpoints(
+        this.toYear!,
+        this.fromYear!,
+        this.fyo
+      );
+      toDate = DateTime.fromISO(fy.toDate).plus({ days: 1 }).toISODate();
+      fromDate = fy.fromDate;
+    }
+
+    return { fromDate, toDate };
+  }
+
+  async _getQueryFilters(): Promise<QueryFilter> {
+    const filters: QueryFilter = {};
+    const { fromDate, toDate } = await this._getFromAndToDates();
+
+    const dateFilter: string[] = [];
+    dateFilter.push('<', toDate);
+    dateFilter.push('>=', fromDate);
+
+    filters.date = dateFilter;
+    filters.reverted = false;
+    return filters;
+  }
+
+  getFilters(): Field[] {
+    const periodNameMap: Record<Periodicity, string> = {
+      Monthly: t`Months`,
+      Quarterly: t`Quarters`,
+      'Half Yearly': t`Half Years`,
+      Yearly: t`Years`,
+    };
+
+    const filters = [
+      {
+        fieldtype: 'Select',
+        options: [
+          { label: t`Fiscal Year`, value: 'Fiscal Year' },
+          { label: t`Until Date`, value: 'Until Date' },
+        ],
+        label: t`Based On`,
+        fieldname: 'basedOn',
+      },
+      {
+        fieldtype: 'Select',
+        options: [
+          { label: t`Monthly`, value: 'Monthly' },
+          { label: t`Quarterly`, value: 'Quarterly' },
+          { label: t`Half Yearly`, value: 'Half Yearly' },
+          { label: t`Yearly`, value: 'Yearly' },
+        ],
+        label: t`Periodicity`,
+        fieldname: 'periodicity',
+      },
+      ,
+    ] as Field[];
+
+    let dateFilters = [
+      {
+        fieldtype: 'Int',
+        fieldname: 'fromYear',
+        placeholder: t`From Year`,
+        label: t`From Year`,
+        minvalue: 2000,
+        required: true,
+      },
+      {
+        fieldtype: 'Int',
+        fieldname: 'toYear',
+        placeholder: t`To Year`,
+        label: t`To Year`,
+        minvalue: 2000,
+        required: true,
+      },
+    ] as Field[];
+
+    if (this.basedOn === 'Until Date') {
+      dateFilters = [
+        {
+          fieldtype: 'Date',
+          fieldname: 'toDate',
+          placeholder: t`To Date`,
+          label: t`To Date`,
+          required: true,
+        },
+        {
+          fieldtype: 'Int',
+          fieldname: 'count',
+          minvalue: 1,
+          placeholder: t`Number of ${periodNameMap[this.periodicity]}`,
+          label: t`Number of ${periodNameMap[this.periodicity]}`,
+          required: true,
+        },
+      ] as Field[];
+    }
+
+    return [
+      filters,
+      dateFilters,
+      {
+        fieldtype: 'Check',
+        label: t`Consolidate Columns`,
+        fieldname: 'consolidateColumns',
+      } as Field,
+      {
+        fieldtype: 'Check',
+        label: t`Hide Group Amounts`,
+        fieldname: 'hideGroupAmounts',
+      } as Field,
+    ].flat();
+  }
+
+  getColumns(): ColumnField[] {
+    const columns = [
+      {
+        label: t`Account`,
+        fieldtype: 'Link',
+        fieldname: 'account',
+        align: 'left',
+        width: ACC_NAME_WIDTH,
+      },
+    ] as ColumnField[];
+
+    const dateColumns = this._dateRanges!.sort(
+      (a, b) => b.toDate.toMillis() - a.toDate.toMillis()
+    ).map((d) => {
+      const toDate = d.toDate.minus({ days: 1 });
+      const label = this.fyo.format(toDate.toJSDate(), 'Date');
+
+      return {
+        label,
+        fieldtype: 'Data',
+        fieldname: 'toDate',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      } as ColumnField;
+    });
+
+    return [columns, dateColumns].flat();
+  }
+
+  metaFilters: string[] = ['basedOn'];
+}
+
+export async function getFiscalEndpoints(
+  toYear: number,
+  fromYear: number,
+  fyo: Fyo
+) {
+  const fys = (await fyo.getValue(
+    ModelNameEnum.AccountingSettings,
+    'fiscalYearStart'
+  )) as Date;
+  const fye = (await fyo.getValue(
+    ModelNameEnum.AccountingSettings,
+    'fiscalYearEnd'
+  )) as Date;
+
+  /**
+   * Get the month and the day, and
+   * prepend with the passed year.
+   */
+
+  const fromDate = [
+    fromYear,
+    (fys.getMonth() + 1).toString().padStart(2, '0'),
+    fys.getDate().toString().padStart(2, '0'),
+  ].join('-');
+
+  const toDate = [
+    toYear,
+    (fye.getMonth() + 1).toString().padStart(2, '0'),
+    fye.getDate().toString().padStart(2, '0'),
+  ].join('-');
+
+  return { fromDate, toDate };
+}
+
+const monthsMap: Record<Periodicity, number> = {
+  Monthly: 1,
+  Quarterly: 3,
+  'Half Yearly': 6,
+  Yearly: 12,
+};
+
+function setPruneFlagOnAccountTreeNodes(accountTree: AccountTree) {
+  for (const account of Object.values(accountTree)) {
+    account.prune = true;
+  }
+}
+
+function setValueMapOnAccountTreeNodes(
+  accountTree: AccountTree,
+  rangeGroupedMap: AccountNameValueMapMap
+) {
+  for (const name of rangeGroupedMap.keys()) {
+    if (!accountTree[name]) {
+      continue;
+    }
+
+    const valueMap = rangeGroupedMap.get(name)!;
+    accountTree[name].valueMap = valueMap;
+    accountTree[name].prune = false;
+
+    /**
+     * Set the update the parent account values recursively
+     * also prevent pruning of the parent accounts.
+     */
+    let parentAccountName: string | null = accountTree[name].parentAccount;
+
+    while (parentAccountName !== null) {
+      parentAccountName = updateParentAccountWithChildValues(
+        accountTree,
+        parentAccountName,
+        valueMap
+      );
+    }
+  }
+}
+
+function updateParentAccountWithChildValues(
+  accountTree: AccountTree,
+  parentAccountName: string,
+  valueMap: ValueMap
+): string {
+  const parentAccount = accountTree[parentAccountName];
+  parentAccount.prune = false;
+  parentAccount.valueMap ??= new Map();
+
+  for (const key of valueMap.keys()) {
+    const value = parentAccount.valueMap.get(key);
+    const childValue = valueMap.get(key);
+    const map: Record<string, number> = {};
+
+    for (const key of Object.keys(childValue!)) {
+      map[key] = (value?.[key] ?? 0) + (childValue?.[key] ?? 0);
+    }
+    parentAccount.valueMap.set(key, map);
+  }
+
+  return parentAccount.parentAccount!;
+}
+
+function setChildrenOnAccountTreeNodes(accountTree: AccountTree) {
+  const parentNodes: Set<string> = new Set();
+
+  for (const name of Object.keys(accountTree)) {
+    const ac = accountTree[name];
+    if (!ac.parentAccount) {
+      continue;
+    }
+
+    accountTree[ac.parentAccount].children ??= [];
+    accountTree[ac.parentAccount].children!.push(ac);
+
+    parentNodes.add(ac.parentAccount);
+  }
+}
+
+function deleteNonRootAccountTreeNodes(accountTree: AccountTree) {
+  for (const name of Object.keys(accountTree)) {
+    const ac = accountTree[name];
+    if (!ac.parentAccount) {
+      continue;
+    }
+
+    delete accountTree[name];
+  }
+}
+
+function pruneAccountTree(accountTree: AccountTree) {
+  for (const root of Object.keys(accountTree)) {
+    if (accountTree[root].prune) {
+      delete accountTree[root];
+    }
+  }
+
+  for (const root of Object.keys(accountTree)) {
+    accountTree[root].children = getPrunedChildren(
+      accountTree[root].children ?? []
+    );
+  }
+}
+
+function getPrunedChildren(children: AccountTreeNode[]): AccountTreeNode[] {
+  return children.filter((child) => {
+    if (child.children?.length) {
+      child.children = getPrunedChildren(child.children);
+    }
+
+    return !child.prune;
+  });
+}
+
+export function convertAccountRootNodesToAccountList(
+  rootNodes: AccountTreeNode[]
+): AccountList {
+  if (!rootNodes || rootNodes.length == 0) {
+    return [];
+  }
+
+  const accountList: AccountList = [];
+  for (const rootNode of rootNodes) {
+    pushToAccountList(rootNode, accountList, 0);
+  }
+  return accountList;
+}
+
+function pushToAccountList(
+  accountTreeNode: AccountTreeNode,
+  accountList: AccountList,
+  level: number
+) {
+  accountList.push({
+    name: accountTreeNode.name,
+    rootType: accountTreeNode.rootType,
+    isGroup: accountTreeNode.isGroup,
+    parentAccount: accountTreeNode.parentAccount,
+    valueMap: accountTreeNode.valueMap,
+    level,
+  });
+
+  const children = accountTreeNode.children ?? [];
+  const childLevel = level + 1;
+
+  for (const childNode of children) {
+    pushToAccountList(childNode, accountList, childLevel);
+  }
+}
+
+function getListOfLeafNodes(tree: Tree): TreeNode[] {
+  const nonGroupChildren: TreeNode[] = [];
+  for (const node of Object.values(tree)) {
+    if (!node) {
+      continue;
+    }
+
+    const groupChildren = node.children ?? [];
+
+    while (groupChildren.length) {
+      const child = groupChildren.shift()!;
+      if (!child?.children?.length) {
+        nonGroupChildren.push(child);
+        continue;
+      }
+
+      groupChildren.unshift(...(child.children ?? []));
+    }
+  }
+
+  return nonGroupChildren;
+}
+
+======================================================================
+FILE: reports\commonExporter.ts
+======================================================================
+import { t } from 'fyo';
+import { Action } from 'fyo/model/types';
+import { Verb } from 'fyo/telemetry/types';
+import { getSavePath, showExportInFolder } from 'src/utils/ui';
+import { getIsNullOrUndef } from 'utils';
+import { generateCSV } from 'utils/csvParser';
+import { Report } from './Report';
+import { ExportExtention, ReportCell } from './types';
+
+interface JSONExport {
+  columns: { fieldname: string; label: string }[];
+  rows: Record<string, unknown>[];
+  filters: Record<string, string>;
+  timestamp: string;
+  reportName: string;
+  softwareName: string;
+  softwareVersion: string;
+}
+
+export default function getCommonExportActions(report: Report): Action[] {
+  const exportExtention = ['csv', 'json'] as ExportExtention[];
+
+  return exportExtention.map((ext) => ({
+    group: t`Export`,
+    label: ext.toUpperCase(),
+    type: 'primary',
+    action: async () => {
+      await exportReport(ext, report);
+    },
+  }));
+}
+
+async function exportReport(extention: ExportExtention, report: Report) {
+  const { filePath, canceled } = await getSavePath(
+    report.reportName,
+    extention
+  );
+
+  if (canceled || !filePath) {
+    return;
+  }
+
+  let data = '';
+
+  if (extention === 'csv') {
+    data = getCsvData(report);
+  } else if (extention === 'json') {
+    data = getJsonData(report);
+  }
+
+  if (!data.length) {
+    return;
+  }
+
+  await saveExportData(data, filePath);
+  report.fyo.telemetry.log(Verb.Exported, report.reportName, { extention });
+}
+
+function getJsonData(report: Report): string {
+  const exportObject: JSONExport = {
+    columns: [],
+    rows: [],
+    filters: {},
+    timestamp: '',
+    reportName: '',
+    softwareName: '',
+    softwareVersion: '',
+  };
+
+  const columns = report.columns;
+  const displayPrecision =
+    (report.fyo.singles.SystemSettings?.displayPrecision as number) ?? 2;
+
+  /**
+   * Set columns as list of fieldname, label
+   */
+  exportObject.columns = columns.map(({ fieldname, label }) => ({
+    fieldname,
+    label,
+  }));
+
+  /**
+   * Set rows as fieldname: value map
+   */
+  for (const row of report.reportData) {
+    if (row.isEmpty) {
+      continue;
+    }
+
+    const rowObj: Record<string, unknown> = {};
+    for (let c = 0; c < row.cells.length; c++) {
+      const { label } = columns[c];
+      const cell = row.cells[c];
+      // If the cell's display value is empty (due to hideGroupAmounts or similar),
+      // export empty string instead of the rawValue
+      let cellValue: unknown;
+      if (cell.value === '' && row.isGroup) {
+        cellValue = '';
+      } else {
+        cellValue = getValueFromCell(cell, displayPrecision);
+      }
+      rowObj[label] = cellValue;
+    }
+
+    exportObject.rows.push(rowObj);
+  }
+
+  /**
+   * Set filter map
+   */
+  for (const { fieldname } of report.filters) {
+    const value = report.get(fieldname);
+    if (getIsNullOrUndef(value)) {
+      continue;
+    }
+
+    exportObject.filters[fieldname] = String(value);
+  }
+
+  /**
+   * Metadata
+   */
+  exportObject.timestamp = new Date().toISOString();
+  exportObject.reportName = report.reportName;
+  exportObject.softwareName = 'KarobarPro';
+  exportObject.softwareVersion = report.fyo.store.appVersion;
+
+  return JSON.stringify(exportObject);
+}
+
+export function getCsvData(report: Report): string {
+  const csvMatrix = convertReportToCSVMatrix(report);
+  return generateCSV(csvMatrix);
+}
+
+function convertReportToCSVMatrix(report: Report): unknown[][] {
+  const displayPrecision =
+    (report.fyo.singles.SystemSettings?.displayPrecision as number) ?? 2;
+  const reportData = report.reportData;
+  const columns = report.columns;
+
+  const csvdata: unknown[][] = [];
+  csvdata.push(columns.map((c) => c.label));
+  for (const row of reportData) {
+    if (row.isEmpty) {
+      csvdata.push(Array(row.cells.length).fill(''));
+      continue;
+    }
+
+    const csvrow: unknown[] = [];
+    for (let c = 0; c < row.cells.length; c++) {
+      const cell = row.cells[c];
+      // If the cell's display value is empty (due to hideGroupAmounts or similar),
+      // export empty string instead of the rawValue
+      if (cell.value === '' && row.isGroup) {
+        csvrow.push('');
+      } else {
+        csvrow.push(getValueFromCell(cell, displayPrecision));
+      }
+    }
+
+    csvdata.push(csvrow);
+  }
+
+  return csvdata;
+}
+
+function getValueFromCell(cell: ReportCell, displayPrecision: number) {
+  const rawValue = cell.rawValue;
+
+  if (rawValue instanceof Date) {
+    return rawValue.toISOString();
+  }
+
+  if (typeof rawValue === 'number') {
+    const value = rawValue.toFixed(displayPrecision);
+
+    /**
+     * remove insignificant zeroes
+     */
+    if (value.endsWith('0'.repeat(displayPrecision))) {
+      return value.slice(0, -displayPrecision - 1);
+    }
+
+    return value;
+  }
+
+  if (getIsNullOrUndef(cell)) {
+    return '';
+  }
+
+  return rawValue;
+}
+
+export async function saveExportData(
+  data: string,
+  filePath: string,
+  message?: string
+) {
+  await ipc.saveData(data, filePath);
+  message ??= t`Export Successful`;
+  showExportInFolder(message, filePath);
+}
+
+======================================================================
+FILE: reports\index.ts
+======================================================================
+import { BalanceSheet } from './BalanceSheet/BalanceSheet';
+import { GeneralLedger } from './GeneralLedger/GeneralLedger';
+import { GSTR1 } from './GoodsAndServiceTax/GSTR1';
+import { GSTR2 } from './GoodsAndServiceTax/GSTR2';
+import { ProfitAndLoss } from './ProfitAndLoss/ProfitAndLoss';
+import { TrialBalance } from './TrialBalance/TrialBalance';
+import { StockBalance } from './inventory/StockBalance';
+import { StockLedger } from './inventory/StockLedger';
+
+export const reports = {
+  GeneralLedger,
+  ProfitAndLoss,
+  BalanceSheet,
+  TrialBalance,
+  GSTR1,
+  GSTR2,
+  StockLedger,
+  StockBalance,
+} as const;
+
+======================================================================
+FILE: reports\LedgerReport.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { Action } from 'fyo/model/types';
+import { ModelNameEnum } from 'models/types';
+import { Report } from 'reports/Report';
+import { GroupedMap, LedgerEntry, RawLedgerEntry } from 'reports/types';
+import { QueryFilter } from 'utils/db/types';
+import { safeParseFloat, safeParseInt } from 'utils/index';
+import getCommonExportActions from './commonExporter';
+
+type GroupByKey = 'account' | 'party' | 'referenceName';
+
+export abstract class LedgerReport extends Report {
+  static title = t`General Ledger`;
+  static reportName = 'general-ledger';
+
+  _rawData: LedgerEntry[] = [];
+  shouldRefresh = false;
+
+  constructor(fyo: Fyo) {
+    super(fyo);
+    this._setObservers();
+  }
+
+  _setObservers() {
+    const listener = () => (this.shouldRefresh = true);
+
+    this.fyo.doc.observer.on(
+      `sync:${ModelNameEnum.AccountingLedgerEntry}`,
+      listener
+    );
+
+    this.fyo.doc.observer.on(
+      `delete:${ModelNameEnum.AccountingLedgerEntry}`,
+      listener
+    );
+  }
+
+  _getGroupByKey() {
+    let groupBy: GroupByKey = 'referenceName';
+    if (this.groupBy && this.groupBy !== 'none') {
+      groupBy = this.groupBy as GroupByKey;
+    }
+    return groupBy;
+  }
+
+  _getGroupedMap(sort: boolean, groupBy?: GroupByKey): GroupedMap {
+    groupBy ??= this._getGroupByKey();
+    /**
+     * Sort rows by ascending or descending
+     */
+    if (sort) {
+      this._rawData.sort((a, b) => {
+        if (this.ascending) {
+          return +a.date! - +b.date!;
+        }
+
+        return +b.date! - +a.date!;
+      });
+    }
+
+    /**
+     * Map remembers the order of insertion
+     * âˆ´ presorting maintains grouping order
+     */
+    const map: GroupedMap = new Map();
+    for (const entry of this._rawData) {
+      const groupingKey = entry[groupBy];
+      if (!map.has(groupingKey)) {
+        map.set(groupingKey, []);
+      }
+
+      map.get(groupingKey)!.push(entry);
+    }
+
+    return map;
+  }
+
+  async _setRawData() {
+    const fields = [
+      'name',
+      'account',
+      'date',
+      'debit',
+      'credit',
+      'referenceType',
+      'referenceName',
+      'party',
+      'reverted',
+      'reverts',
+    ];
+
+    const filters = await this._getQueryFilters();
+    const entries = (await this.fyo.db.getAllRaw(
+      ModelNameEnum.AccountingLedgerEntry,
+      {
+        fields,
+        filters,
+        orderBy: ['date', 'created'],
+        order: this.ascending ? 'asc' : 'desc',
+      }
+    )) as RawLedgerEntry[];
+
+    this._rawData = entries.map((entry) => {
+      return {
+        name: safeParseInt(entry.name),
+        account: entry.account,
+        date: new Date(entry.date),
+        debit: Math.abs(safeParseFloat(entry.debit)),
+        credit: Math.abs(safeParseFloat(entry.credit)),
+        balance: 0,
+        referenceType: entry.referenceType,
+        referenceName: entry.referenceName,
+        party: entry.party,
+        reverted: Boolean(entry.reverted),
+        reverts: entry.reverts,
+      } as LedgerEntry;
+    });
+  }
+
+  abstract _getQueryFilters(): QueryFilter | Promise<QueryFilter>;
+
+  getActions(): Action[] {
+    return getCommonExportActions(this);
+  }
+}
+
+======================================================================
+FILE: reports\Report.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { Converter } from 'fyo/core/converter';
+import { DocValue } from 'fyo/core/types';
+import { Action } from 'fyo/model/types';
+import Observable from 'fyo/utils/observable';
+import { Field, RawValue } from 'schemas/types';
+import { getIsNullOrUndef } from 'utils';
+import { ColumnField, ReportData } from './types';
+
+export abstract class Report extends Observable<RawValue> {
+  static title: string;
+  static reportName: string;
+  static isInventory = false;
+
+  fyo: Fyo;
+  columns: ColumnField[] = [];
+  filters: Field[] = [];
+  reportData: ReportData;
+  usePagination = false;
+  shouldRefresh = false;
+  abstract loading: boolean;
+
+  constructor(fyo: Fyo) {
+    super();
+    this.fyo = fyo;
+    this.reportData = [];
+  }
+
+  get title(): string {
+    return (this.constructor as typeof Report).title;
+  }
+
+  get reportName(): string {
+    return (this.constructor as typeof Report).reportName;
+  }
+
+  async initialize() {
+    /**
+     * Not in constructor cause possibly async.
+     */
+
+    await this.setDefaultFilters();
+    this.filters = await this.getFilters();
+    this.columns = await this.getColumns();
+    await this.setReportData();
+  }
+
+  get filterMap() {
+    const filterMap: Record<string, RawValue> = {};
+    for (const { fieldname } of this.filters) {
+      const value = this.get(fieldname);
+      if (getIsNullOrUndef(value)) {
+        continue;
+      }
+
+      filterMap[fieldname] = value;
+    }
+
+    return filterMap;
+  }
+
+  async set(key: string, value: DocValue, callPostSet = true) {
+    const field = this.filters.find((f) => f.fieldname === key);
+    if (field === undefined) {
+      return;
+    }
+
+    value = Converter.toRawValue(value, field, this.fyo);
+    const prevValue = this[key];
+    if (prevValue === value) {
+      return;
+    }
+
+    if (getIsNullOrUndef(value)) {
+      delete this[key];
+    } else {
+      this[key] = value;
+    }
+
+    if (callPostSet) {
+      await this.updateData(key);
+    }
+  }
+
+  async updateData(key?: string, force?: boolean) {
+    await this.setDefaultFilters();
+    this.filters = await this.getFilters();
+    this.columns = await this.getColumns();
+    await this.setReportData(key, force);
+  }
+
+  /**
+   * Should first check if filter value is set
+   * and update only if it is not set.
+   */
+  abstract setDefaultFilters(): void | Promise<void>;
+  abstract getActions(): Action[];
+  abstract getFilters(): Field[] | Promise<Field[]>;
+  abstract getColumns(): ColumnField[] | Promise<ColumnField[]>;
+  abstract setReportData(filter?: string, force?: boolean): Promise<void>;
+}
+
+======================================================================
+FILE: reports\types.ts
+======================================================================
+import { DateTime } from 'luxon';
+import { AccountRootType } from 'models/baseModels/Account/types';
+import { BaseField, FieldType, RawValue } from 'schemas/types';
+
+export type ExportExtention = 'csv' | 'json';
+
+export interface ReportCell {
+  bold?: boolean;
+  italics?: boolean;
+  align?: 'left' | 'right' | 'center';
+  width?: number;
+  value: string;
+  rawValue: RawValue | undefined | Date;
+  indent?: number;
+  color?: 'red' | 'green';
+}
+
+export interface ReportRow {
+  cells: ReportCell[];
+  level?: number;
+  isGroup?: boolean;
+  isEmpty?: boolean;
+  folded?: boolean;
+  foldedBelow?: boolean;
+}
+export type ReportData = ReportRow[];
+export interface ColumnField extends Omit<BaseField, 'fieldtype'> {
+  fieldtype: FieldType;
+  align?: 'left' | 'right' | 'center';
+  width?: number;
+}
+
+export type BalanceType = 'Credit' | 'Debit';
+export type Periodicity = 'Monthly' | 'Quarterly' | 'Half Yearly' | 'Yearly';
+export interface FinancialStatementOptions {
+  rootType: AccountRootType;
+  fromDate: string;
+  toDate: string;
+  balanceMustBe?: BalanceType;
+  periodicity?: Periodicity;
+  accumulateValues?: boolean;
+}
+
+export interface RawLedgerEntry {
+  name: string;
+  account: string;
+  date: string;
+  debit: string;
+  credit: string;
+  referenceType: string;
+  referenceName: string;
+  party: string;
+  reverted: number;
+  reverts: string;
+  [key: string]: RawValue;
+}
+
+export interface LedgerEntry {
+  index?: string;
+  name: number;
+  account: string;
+  date: Date | null;
+  debit: number | null;
+  credit: number | null;
+  balance: number | null;
+  referenceType: string;
+  referenceName: string;
+  party: string;
+  reverted: boolean;
+  reverts: string;
+}
+
+export type GroupedMap = Map<string, LedgerEntry[]>;
+
+export type DateRange = { fromDate: DateTime; toDate: DateTime };
+export type ValueMap = Map<DateRange, Record<string, number>>;
+
+export interface Account {
+  name: string;
+  rootType: AccountRootType;
+  isGroup: boolean;
+  parentAccount: string | null;
+}
+
+export type AccountTree = Record<string, AccountTreeNode>;
+export interface AccountTreeNode extends Account {
+  children?: AccountTreeNode[];
+  valueMap?: ValueMap;
+  prune?: boolean;
+}
+
+export type AccountList = AccountListNode[];
+export interface AccountListNode extends Account {
+  valueMap?: ValueMap;
+  level?: number;
+}
+
+export type AccountNameValueMapMap = Map<string, ValueMap>;
+export type BasedOn = 'Fiscal Year' | 'Until Date';
+
+export interface TreeNode {
+  name: string;
+  children?: TreeNode[];
+}
+
+export type Tree = Record<string, TreeNode>;
+
+export type RootTypeRow = {
+  rootType: AccountRootType;
+  rootNodes: AccountTreeNode[];
+  rows: ReportData;
+};
+
+======================================================================
+FILE: reports\BalanceSheet\BalanceSheet.ts
+======================================================================
+import { t } from 'fyo';
+import {
+  AccountRootType,
+  AccountRootTypeEnum,
+} from 'models/baseModels/Account/types';
+import {
+  AccountReport,
+  convertAccountRootNodesToAccountList,
+} from 'reports/AccountReport';
+import { ReportData, RootTypeRow } from 'reports/types';
+import { getMapFromList } from 'utils';
+
+export class BalanceSheet extends AccountReport {
+  static title = t`Balance Sheet`;
+  static reportName = 'balance-sheet';
+  loading = false;
+
+  get rootTypes(): AccountRootType[] {
+    return [
+      AccountRootTypeEnum.Asset,
+      AccountRootTypeEnum.Liability,
+      AccountRootTypeEnum.Equity,
+    ];
+  }
+
+  async setReportData(filter?: string, force?: boolean) {
+    this.loading = true;
+    if (force || filter !== 'hideGroupAmounts') {
+      await this._setRawData();
+    }
+
+    const map = this._getGroupedMap(true, 'account');
+    const rangeGroupedMap = await this._getGroupedByDateRanges(map);
+    const accountTree = await this._getAccountTree(rangeGroupedMap);
+
+    for (const name of Object.keys(accountTree)) {
+      const { rootType } = accountTree[name];
+      if (this.rootTypes.includes(rootType)) {
+        continue;
+      }
+
+      delete accountTree[name];
+    }
+
+    const rootTypeRows: RootTypeRow[] = this.rootTypes
+      .map((rootType) => {
+        const rootNodes = this.getRootNodes(rootType, accountTree)!;
+        const rootList = convertAccountRootNodesToAccountList(rootNodes);
+        return {
+          rootType,
+          rootNodes,
+          rows: this.getReportRowsFromAccountList(rootList),
+        };
+      })
+      .filter((row) => !!row.rootNodes.length);
+
+    this.reportData = this.getReportDataFromRows(
+      getMapFromList(rootTypeRows, 'rootType')
+    );
+    this.loading = false;
+  }
+
+  getReportDataFromRows(
+    rootTypeRows: Record<AccountRootType, RootTypeRow | undefined>
+  ): ReportData {
+    const typeNameList = [
+      {
+        rootType: AccountRootTypeEnum.Asset,
+        totalName: t`Total Asset (Debit)`,
+      },
+      {
+        rootType: AccountRootTypeEnum.Liability,
+        totalName: t`Total Liability (Credit)`,
+      },
+      {
+        rootType: AccountRootTypeEnum.Equity,
+        totalName: t`Total Equity (Credit)`,
+      },
+    ];
+
+    const reportData: ReportData = [];
+    const emptyRow = this.getEmptyRow();
+    for (const { rootType, totalName } of typeNameList) {
+      const row = rootTypeRows[rootType];
+      if (!row) {
+        continue;
+      }
+
+      reportData.push(...row.rows);
+
+      if (row.rootNodes.length) {
+        const totalNode = this.getTotalNode(row.rootNodes, totalName);
+        const totalRow = this.getRowFromAccountListNode(totalNode);
+        reportData.push(totalRow);
+      }
+
+      reportData.push(emptyRow);
+    }
+
+    if (reportData.at(-1)?.isEmpty) {
+      reportData.pop();
+    }
+
+    return reportData;
+  }
+}
+
+======================================================================
+FILE: reports\GeneralLedger\GeneralLedger.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { DateTime } from 'luxon';
+import { ModelNameEnum } from 'models/types';
+import { LedgerReport } from 'reports/LedgerReport';
+import {
+  ColumnField,
+  GroupedMap,
+  LedgerEntry,
+  ReportData,
+  ReportRow,
+} from 'reports/types';
+import { Field, FieldTypeEnum } from 'schemas/types';
+import { QueryFilter } from 'utils/db/types';
+
+type ReferenceType =
+  | ModelNameEnum.SalesInvoice
+  | ModelNameEnum.PurchaseInvoice
+  | ModelNameEnum.Payment
+  | ModelNameEnum.JournalEntry
+  | ModelNameEnum.Shipment
+  | ModelNameEnum.PurchaseReceipt
+  | 'All';
+
+export class GeneralLedger extends LedgerReport {
+  static title = t`General Ledger`;
+  static reportName = 'general-ledger';
+  usePagination = true;
+  loading = false;
+
+  ascending = false;
+  reverted = false;
+  referenceType: ReferenceType = 'All';
+  groupBy: 'none' | 'party' | 'account' | 'referenceName' = 'none';
+  _rawData: LedgerEntry[] = [];
+
+  constructor(fyo: Fyo) {
+    super(fyo);
+  }
+
+  setDefaultFilters() {
+    if (!this.toDate) {
+      this.toDate = DateTime.now().plus({ days: 1 }).toISODate();
+      this.fromDate = DateTime.now().minus({ years: 1 }).toISODate();
+    }
+  }
+
+  async setReportData(filter?: string, force?: boolean) {
+    this.loading = true;
+    let sort = true;
+    if (force || filter !== 'grouped' || this._rawData.length === 0) {
+      await this._setRawData();
+      sort = false;
+    }
+
+    const map = this._getGroupedMap(sort);
+    this._setIndexOnEntries(map);
+    const { totalDebit, totalCredit } = this._getTotalsAndSetBalance(map);
+    const consolidated = this._consolidateEntries(map);
+
+    /**
+     * Push a blank row if last row isn't blank
+     */
+    if (consolidated.at(-1)?.name !== -3) {
+      this._pushBlankEntry(consolidated);
+    }
+
+    /**
+     * Set the closing row
+     */
+    consolidated.push({
+      name: -2, // Bold
+      account: t`Closing`,
+      date: null,
+      debit: totalDebit,
+      credit: totalCredit,
+      balance: totalDebit - totalCredit,
+      referenceType: '',
+      referenceName: '',
+      party: '',
+      reverted: false,
+      reverts: '',
+    });
+
+    this.reportData = this._convertEntriesToReportData(consolidated);
+    this.loading = false;
+  }
+
+  _setIndexOnEntries(map: GroupedMap) {
+    let i = 1;
+    for (const key of map.keys()) {
+      for (const entry of map.get(key)!) {
+        entry.index = String(i);
+        i = i + 1;
+      }
+    }
+  }
+
+  _convertEntriesToReportData(entries: LedgerEntry[]): ReportData {
+    const reportData = [];
+    for (const entry of entries) {
+      const row = this._getRowFromEntry(entry, this.columns);
+      reportData.push(row);
+    }
+
+    return reportData;
+  }
+
+  _getRowFromEntry(entry: LedgerEntry, columns: ColumnField[]): ReportRow {
+    if (entry.name === -3) {
+      return {
+        isEmpty: true,
+        cells: columns.map((c) => ({
+          rawValue: '',
+          value: '',
+          width: c.width ?? 1,
+        })),
+      };
+    }
+
+    const row: ReportRow = { cells: [] };
+    for (const col of columns) {
+      const align = col.align ?? 'left';
+      const width = col.width ?? 1;
+      const fieldname = col.fieldname;
+
+      let value = entry[fieldname as keyof LedgerEntry];
+      const rawValue = value;
+      if (value === null || value === undefined) {
+        value = '';
+      }
+
+      if (value instanceof Date) {
+        value = this.fyo.format(value, FieldTypeEnum.Date);
+      }
+
+      if (typeof value === 'number' && fieldname !== 'index') {
+        value = this.fyo.format(value, FieldTypeEnum.Currency);
+      }
+
+      if (typeof value === 'boolean' && fieldname === 'reverted') {
+        value = value ? t`Reverted` : '';
+      } else {
+        value = String(value);
+      }
+
+      if (fieldname === 'referenceType') {
+        value = this.fyo.schemaMap[value]?.label ?? value;
+      }
+
+      row.cells.push({
+        italics: entry.name === -1,
+        bold: entry.name === -2,
+        value,
+        rawValue,
+        align,
+        width,
+      });
+    }
+
+    return row;
+  }
+
+  _consolidateEntries(map: GroupedMap) {
+    const entries: LedgerEntry[] = [];
+    for (const key of map.keys()) {
+      entries.push(...map.get(key)!);
+
+      /**
+       * Add blank row for spacing if groupBy
+       */
+      if (this.groupBy !== 'none') {
+        this._pushBlankEntry(entries);
+      }
+    }
+
+    return entries;
+  }
+
+  _pushBlankEntry(entries: LedgerEntry[]) {
+    entries.push({
+      name: -3, // Empty
+      account: '',
+      date: null,
+      debit: null,
+      credit: null,
+      balance: null,
+      referenceType: '',
+      referenceName: '',
+      party: '',
+      reverted: false,
+      reverts: '',
+    });
+  }
+
+  _getTotalsAndSetBalance(map: GroupedMap) {
+    let totalDebit = 0;
+    let totalCredit = 0;
+
+    for (const key of map.keys()) {
+      let balance = 0;
+      let debit = 0;
+      let credit = 0;
+
+      for (const entry of map.get(key)!) {
+        debit += entry.debit!;
+        credit += entry.credit!;
+
+        const diff = entry.debit! - entry.credit!;
+        balance += diff;
+        entry.balance = balance;
+      }
+
+      /**
+       * Total row incase groupBy is used
+       */
+      if (this.groupBy !== 'none') {
+        map.get(key)?.push({
+          name: -1, // Italics
+          account: t`Total`,
+          date: null,
+          debit,
+          credit,
+          balance: debit - credit,
+          referenceType: '',
+          referenceName: '',
+          party: '',
+          reverted: false,
+          reverts: '',
+        });
+      }
+
+      /**
+       * Total debit and credit for the final row
+       */
+      totalDebit += debit;
+      totalCredit += credit;
+    }
+
+    return { totalDebit, totalCredit };
+  }
+
+  _getQueryFilters(): QueryFilter {
+    const filters: QueryFilter = {};
+    const stringFilters = ['account', 'party', 'referenceName'];
+
+    for (const sf of stringFilters) {
+      const value = this[sf];
+      if (value === undefined) {
+        continue;
+      }
+
+      filters[sf] = value as string;
+    }
+
+    if (this.referenceType !== 'All') {
+      filters.referenceType = this.referenceType as string;
+    }
+
+    if (this.toDate) {
+      filters.date ??= [];
+      (filters.date as string[]).push('<=', this.toDate as string);
+    }
+
+    if (this.fromDate) {
+      filters.date ??= [];
+      (filters.date as string[]).push('>=', this.fromDate as string);
+    }
+
+    if (!this.reverted) {
+      filters.reverted = false;
+    }
+
+    return filters;
+  }
+
+  getFilters() {
+    const refTypeOptions = [
+      { label: t`All`, value: 'All' },
+      { label: t`Sales Invoices`, value: 'SalesInvoice' },
+      { label: t`Purchase Invoices`, value: 'PurchaseInvoice' },
+      { label: t`Payments`, value: 'Payment' },
+      { label: t`Journal Entries`, value: 'JournalEntry' },
+    ];
+
+    if (!this.fyo.singles.AccountingSettings?.enableInventory) {
+      refTypeOptions.push(
+        { label: t`Shipment`, value: 'Shipment' },
+        { label: t`Purchase Receipt`, value: 'PurchaseReceipt' }
+      );
+    }
+
+    return [
+      {
+        fieldtype: 'Select',
+        options: refTypeOptions,
+        label: t`Ref Type`,
+        fieldname: 'referenceType',
+        placeholder: t`Ref Type`,
+      },
+      {
+        fieldtype: 'DynamicLink',
+        label: t`Ref. Name`,
+        references: 'referenceType',
+        placeholder: t`Ref Name`,
+        emptyMessage: t`Change Ref Type`,
+        fieldname: 'referenceName',
+      },
+      {
+        fieldtype: 'Link',
+        target: 'Account',
+        placeholder: t`Account`,
+        label: t`Account`,
+        fieldname: 'account',
+      },
+      {
+        fieldtype: 'Link',
+        target: 'Party',
+        label: t`Party`,
+        placeholder: t`Party`,
+        fieldname: 'party',
+      },
+      {
+        fieldtype: 'Date',
+        placeholder: t`From Date`,
+        label: t`From Date`,
+        fieldname: 'fromDate',
+      },
+      {
+        fieldtype: 'Date',
+        placeholder: t`To Date`,
+        label: t`To Date`,
+        fieldname: 'toDate',
+      },
+      {
+        fieldtype: 'Select',
+        label: t`Group By`,
+        fieldname: 'groupBy',
+        options: [
+          { label: t`None`, value: 'none' },
+          { label: t`Party`, value: 'party' },
+          { label: t`Account`, value: 'account' },
+          { label: t`Reference`, value: 'referenceName' },
+        ],
+      },
+      {
+        fieldtype: 'Check',
+        label: t`Include Cancelled`,
+        fieldname: 'reverted',
+      },
+      {
+        fieldtype: 'Check',
+        label: t`Ascending Order`,
+        fieldname: 'ascending',
+      },
+    ] as Field[];
+  }
+
+  getColumns(): ColumnField[] {
+    let columns = [
+      {
+        label: '#',
+        fieldtype: 'Int',
+        fieldname: 'index',
+        align: 'right',
+        width: 0.5,
+      },
+      {
+        label: t`Account`,
+        fieldtype: 'Link',
+        fieldname: 'account',
+        width: 1.5,
+      },
+      {
+        label: t`Date`,
+        fieldtype: 'Date',
+        fieldname: 'date',
+      },
+      {
+        label: t`Debit`,
+        fieldtype: 'Currency',
+        fieldname: 'debit',
+        align: 'right',
+        width: 1.25,
+      },
+      {
+        label: t`Credit`,
+        fieldtype: 'Currency',
+        fieldname: 'credit',
+        align: 'right',
+        width: 1.25,
+      },
+      {
+        label: t`Balance`,
+        fieldtype: 'Currency',
+        fieldname: 'balance',
+        align: 'right',
+        width: 1.25,
+      },
+      {
+        label: t`Party`,
+        fieldtype: 'Link',
+        fieldname: 'party',
+      },
+      {
+        label: t`Ref Name`,
+        fieldtype: 'Data',
+        fieldname: 'referenceName',
+      },
+      {
+        label: t`Ref Type`,
+        fieldtype: 'Data',
+        fieldname: 'referenceType',
+      },
+      {
+        label: t`Reverted`,
+        fieldtype: 'Check',
+        fieldname: 'reverted',
+      },
+    ] as ColumnField[];
+
+    if (!this.reverted) {
+      columns = columns.filter((f) => f.fieldname !== 'reverted');
+    }
+
+    return columns;
+  }
+}
+
+======================================================================
+FILE: reports\GoodsAndServiceTax\BaseGSTR.ts
+======================================================================
+import { t } from 'fyo';
+import { Action } from 'fyo/model/types';
+import { DateTime } from 'luxon';
+import { Invoice } from 'models/baseModels/Invoice/Invoice';
+import { Party } from 'models/regionalModels/in/Party';
+import { ModelNameEnum } from 'models/types';
+import { codeStateMap } from 'regional/in';
+import { Report } from 'reports/Report';
+import { ColumnField, ReportData, ReportRow } from 'reports/types';
+import { Field, OptionField } from 'schemas/types';
+import { isNumeric } from 'src/utils';
+import getGSTRExportActions from './gstExporter';
+import { GSTRRow, GSTRType, TransferType, TransferTypeEnum } from './types';
+
+export abstract class BaseGSTR extends Report {
+  place?: string;
+  toDate?: string;
+  fromDate?: string;
+  transferType?: TransferType;
+  usePagination = true;
+  gstrRows?: GSTRRow[];
+  loading = false;
+
+  abstract gstrType: GSTRType;
+
+  get transferTypeMap(): Record<string, string> {
+    if (this.gstrType === 'GSTR-2') {
+      return {
+        B2B: 'B2B',
+      };
+    }
+
+    return {
+      B2B: 'B2B',
+      B2CL: 'B2C-Large',
+      B2CS: 'B2C-Small',
+      NR: 'Nil Rated, Exempted and Non GST supplies',
+    };
+  }
+
+  get schemaName() {
+    if (this.gstrType === 'GSTR-1') {
+      return ModelNameEnum.SalesInvoice;
+    }
+
+    return ModelNameEnum.PurchaseInvoice;
+  }
+
+  async setReportData(): Promise<void> {
+    this.loading = true;
+    const gstrRows = await this.getGstrRows();
+    const filteredRows = this.filterGstrRows(gstrRows);
+    this.gstrRows = filteredRows;
+    this.reportData = this.getReportDataFromGSTRRows(filteredRows);
+    this.loading = false;
+  }
+
+  getReportDataFromGSTRRows(gstrRows: GSTRRow[]): ReportData {
+    const reportData: ReportData = [];
+    for (const row of gstrRows) {
+      const reportRow: ReportRow = { cells: [] };
+
+      for (const { fieldname, fieldtype, width } of this.columns) {
+        const align = isNumeric(fieldtype) ? 'right' : 'left';
+
+        const rawValue = row[fieldname as keyof GSTRRow];
+        let value = '';
+        if (rawValue !== undefined) {
+          value = this.fyo.format(rawValue, fieldtype);
+        }
+
+        reportRow.cells.push({
+          align,
+          rawValue,
+          value,
+          width: width ?? 1,
+        });
+      }
+
+      reportData.push(reportRow);
+    }
+
+    return reportData;
+  }
+
+  filterGstrRows(gstrRows: GSTRRow[]) {
+    return gstrRows.filter((row) => {
+      let allow = true;
+      if (this.place) {
+        allow &&= codeStateMap[this.place] === row.place;
+      }
+      this.place;
+      return (allow &&= this.transferFilterFunction(row));
+    });
+  }
+
+  get transferFilterFunction(): (row: GSTRRow) => boolean {
+    if (this.transferType === 'B2B') {
+      return (row) => !!row.gstin;
+    }
+
+    if (this.transferType === 'B2CL') {
+      return (row) => !row.gstin && !row.inState && row.invAmt >= 250000;
+    }
+
+    if (this.transferType === 'B2CS') {
+      return (row) => !row.gstin && (row.inState || row.invAmt < 250000);
+    }
+
+    if (this.transferType === 'NR') {
+      return (row) => row.rate === 0; // this takes care of both nil rated, exempted goods
+    }
+
+    return () => true;
+  }
+
+  async getEntries() {
+    const date: string[] = [];
+    if (this.toDate) {
+      date.push('<=', this.toDate);
+    }
+
+    if (this.fromDate) {
+      date.push('>=', this.fromDate);
+    }
+
+    return (await this.fyo.db.getAllRaw(this.schemaName, {
+      filters: { date, submitted: true, cancelled: false },
+    })) as { name: string }[];
+  }
+
+  async getGstrRows(): Promise<GSTRRow[]> {
+    const entries = await this.getEntries();
+    const gstrRows: GSTRRow[] = [];
+    for (const entry of entries) {
+      const gstrRow = await this.getGstrRow(entry.name);
+      gstrRows.push(gstrRow);
+    }
+    return gstrRows;
+  }
+
+  async getGstrRow(entryName: string): Promise<GSTRRow> {
+    const entry = (await this.fyo.doc.getDoc(
+      this.schemaName,
+      entryName
+    )) as Invoice;
+    const gstin = (await this.fyo.getValue(
+      ModelNameEnum.AccountingSettings,
+      'gstin'
+    )) as string | null;
+
+    const party = (await this.fyo.doc.getDoc('Party', entry.party)) as Party;
+
+    let place = '';
+    if (party.address) {
+      const pos = (await this.fyo.getValue(
+        ModelNameEnum.Address,
+        party.address as string,
+        'pos'
+      )) as string | undefined;
+
+      place = pos ?? '';
+    } else if (party.gstin) {
+      const code = party.gstin.slice(0, 2);
+      place = codeStateMap[code] ?? '';
+    }
+
+    let inState = false;
+    if (gstin) {
+      inState = codeStateMap[gstin.slice(0, 2)] === place;
+    }
+
+    const gstrRow: GSTRRow = {
+      gstin: party.gstin ?? '',
+      partyName: entry.party!,
+      invNo: entry.name!,
+      invDate: entry.date!,
+      rate: 0,
+      reverseCharge: !party.gstin ? 'Y' : 'N',
+      inState,
+      place,
+      invAmt: entry.grandTotal?.float ?? 0,
+      taxVal: entry.netTotal?.float ?? 0,
+    };
+
+    for (const tax of entry.taxes ?? []) {
+      gstrRow.rate += tax.rate ?? 0;
+    }
+
+    this.setTaxValuesOnGSTRRow(entry, gstrRow);
+    return gstrRow;
+  }
+
+  setTaxValuesOnGSTRRow(entry: Invoice, gstrRow: GSTRRow) {
+    for (const tax of entry.taxes ?? []) {
+      const rate = tax.rate ?? 0;
+      gstrRow.rate += rate;
+      const taxAmt = entry.netTotal!.percent(rate).float;
+
+      switch (tax.account) {
+        case 'IGST': {
+          gstrRow.igstAmt = taxAmt;
+          gstrRow.inState = false;
+        }
+        case 'CGST':
+          gstrRow.cgstAmt = taxAmt;
+        case 'SGST':
+          gstrRow.sgstAmt = taxAmt;
+        case 'Nil Rated':
+          gstrRow.nilRated = true;
+        case 'Exempt':
+          gstrRow.exempt = true;
+        case 'Non GST':
+          gstrRow.nonGST = true;
+      }
+    }
+  }
+
+  setDefaultFilters() {
+    if (!this.toDate) {
+      this.toDate = DateTime.local().toISODate();
+    }
+
+    if (!this.fromDate) {
+      this.fromDate = DateTime.local().minus({ months: 3 }).toISODate();
+    }
+
+    if (!this.transferType) {
+      this.transferType = 'B2B';
+    }
+  }
+
+  getFilters(): Field[] {
+    const transferTypeMap = this.transferTypeMap;
+    const options = Object.keys(transferTypeMap).map((k) => ({
+      value: k,
+      label: transferTypeMap[k],
+    }));
+
+    return [
+      {
+        fieldtype: 'Select',
+        label: t`Transfer Type`,
+        placeholder: t`Transfer Type`,
+        fieldname: 'transferType',
+        options,
+      } as OptionField,
+      {
+        fieldtype: 'AutoComplete',
+        label: t`Place`,
+        placeholder: t`Place`,
+        fieldname: 'place',
+        options: Object.keys(codeStateMap).map((code) => {
+          return {
+            value: code,
+            label: codeStateMap[code],
+          };
+        }),
+      } as OptionField,
+      {
+        fieldtype: 'Date',
+        label: t`From Date`,
+        placeholder: t`From Date`,
+        fieldname: 'fromDate',
+      },
+      {
+        fieldtype: 'Date',
+        label: t`To Date`,
+        placeholder: t`To Date`,
+        fieldname: 'toDate',
+      },
+    ];
+  }
+
+  getColumns(): ColumnField[] | Promise<ColumnField[]> {
+    const columns = [
+      {
+        label: t`Party`,
+        fieldtype: 'Data',
+        fieldname: 'partyName',
+        width: 1.5,
+      },
+      {
+        label: t`Invoice No.`,
+        fieldname: 'invNo',
+        fieldtype: 'Data',
+      },
+      {
+        label: t`Invoice Value`,
+        fieldname: 'invAmt',
+        fieldtype: 'Currency',
+      },
+      {
+        label: t`Invoice Date`,
+        fieldname: 'invDate',
+        fieldtype: 'Date',
+      },
+      {
+        label: t`Place of supply`,
+        fieldname: 'place',
+        fieldtype: 'Data',
+      },
+      {
+        label: t`Rate`,
+        fieldname: 'rate',
+        width: 0.5,
+      },
+      {
+        label: t`Taxable Value`,
+        fieldname: 'taxVal',
+        fieldtype: 'Currency',
+      },
+      {
+        label: t`Reverse Chrg.`,
+        fieldname: 'reverseCharge',
+        fieldtype: 'Data',
+      },
+      {
+        label: t`Intergrated Tax`,
+        fieldname: 'igstAmt',
+        fieldtype: 'Currency',
+      },
+      {
+        label: t`Central Tax`,
+        fieldname: 'cgstAmt',
+        fieldtype: 'Currency',
+      },
+      {
+        label: t`State Tax`,
+        fieldname: 'sgstAmt',
+        fieldtype: 'Currency',
+      },
+    ] as ColumnField[];
+
+    const transferType = this.transferType ?? TransferTypeEnum.B2B;
+    if (transferType === TransferTypeEnum.B2B) {
+      columns.unshift({
+        label: t`GSTIN No.`,
+        fieldname: 'gstin',
+        fieldtype: 'Data',
+        width: 1.5,
+      });
+    }
+
+    return columns;
+  }
+
+  getActions(): Action[] {
+    return getGSTRExportActions(this);
+  }
+}
+
+======================================================================
+FILE: reports\GoodsAndServiceTax\gstExporter.ts
+======================================================================
+import { Action } from 'fyo/model/types';
+import { Verb } from 'fyo/telemetry/types';
+import { DateTime } from 'luxon';
+import { ModelNameEnum } from 'models/types';
+import { codeStateMap } from 'regional/in';
+import { ExportExtention } from 'reports/types';
+import { showDialog } from 'src/utils/interactive';
+import { invertMap } from 'utils';
+import { getCsvData, saveExportData } from '../commonExporter';
+import { BaseGSTR } from './BaseGSTR';
+import { TransferTypeEnum } from './types';
+import { getSavePath } from 'src/utils/ui';
+
+const GST = {
+  'GST-0': 0,
+  'GST-0.25': 0.25,
+  'GST-3': 3,
+  'GST-5': 5,
+  'GST-6': 6,
+  'GST-12': 12,
+  'GST-18': 18,
+  'GST-28': 28,
+  'IGST-0': 0,
+  'IGST-0.25': 0.25,
+  'IGST-3': 3,
+  'IGST-5': 5,
+  'IGST-6': 6,
+  'IGST-12': 12,
+  'IGST-18': 18,
+  'IGST-28': 28,
+} as Record<string, number>;
+
+const CSGST = {
+  'GST-0': 0,
+  'GST-0.25': 0.125,
+  'GST-3': 1.5,
+  'GST-5': 2.5,
+  'GST-6': 3,
+  'GST-12': 6,
+  'GST-18': 9,
+  'GST-28': 14,
+} as Record<string, number>;
+
+const IGST = {
+  'IGST-0.25': 0.25,
+  'IGST-3': 3,
+  'IGST-5': 5,
+  'IGST-6': 6,
+  'IGST-12': 12,
+  'IGST-18': 18,
+  'IGST-28': 28,
+} as Record<string, number>;
+
+interface GSTData {
+  version: string;
+  hash: string;
+  gstin: string;
+  fp: string;
+  b2b?: B2BCustomer[];
+  b2cl?: B2CLStateInvoiceRecord[];
+  b2cs?: B2CSInvRecord[];
+}
+
+interface B2BCustomer {
+  ctin: string;
+  inv: B2BInvRecord[];
+}
+
+interface B2BInvRecord {
+  inum: string;
+  idt: string;
+  val: number;
+  pos: string;
+  rchrg: 'Y' | 'N';
+  inv_typ: string;
+  itms: B2BItmRecord[];
+}
+
+interface B2BItmRecord {
+  num: number;
+  itm_det: {
+    txval: number;
+    rt: number;
+    csamt: number;
+    camt: number;
+    samt: number;
+    iamt: number;
+  };
+}
+
+interface B2CLInvRecord {
+  inum: string;
+  idt: string;
+  val: number;
+  itms: B2CLItmRecord[];
+}
+
+interface B2CLItmRecord {
+  num: number;
+  itm_det: {
+    txval: number;
+    rt: number;
+    csamt: 0;
+    iamt: number;
+  };
+}
+
+interface B2CLStateInvoiceRecord {
+  pos: string;
+  inv: B2CLInvRecord[];
+}
+
+interface B2CSInvRecord {
+  sply_ty: 'INTRA' | 'INTER';
+  pos: string;
+  typ: 'OE'; // "OE" -  Errors and omissions excepted.
+  txval: number;
+  rt: number;
+  iamt: number;
+  camt: number;
+  samt: number;
+  csamt: number;
+}
+
+export default function getGSTRExportActions(report: BaseGSTR): Action[] {
+  const exportExtention = ['csv', 'json'] as ExportExtention[];
+
+  return exportExtention.map((ext) => ({
+    group: `Export`,
+    label: ext.toUpperCase(),
+    type: 'primary',
+    action: async () => {
+      await exportReport(ext, report);
+    },
+  }));
+}
+
+async function exportReport(extention: ExportExtention, report: BaseGSTR) {
+  const canExport = await getCanExport(report);
+  if (!canExport) {
+    return;
+  }
+
+  const { filePath, canceled } = await getSavePath(
+    report.reportName,
+    extention
+  );
+
+  if (canceled || !filePath) {
+    return;
+  }
+
+  let data = '';
+
+  if (extention === 'csv') {
+    data = getCsvData(report);
+  } else if (extention === 'json') {
+    data = await getGstrJsonData(report);
+  }
+
+  if (!data.length) {
+    return;
+  }
+
+  await saveExportData(data, filePath);
+  report.fyo.telemetry.log(Verb.Exported, report.reportName, { extention });
+}
+
+async function getCanExport(report: BaseGSTR) {
+  const gstin = await report.fyo.getValue(
+    ModelNameEnum.AccountingSettings,
+    'gstin'
+  );
+  if (gstin) {
+    return true;
+  }
+
+  await showDialog({
+    title: report.fyo.t`Cannot Export`,
+    detail: report.fyo.t`Please set GSTIN in General Settings.`,
+    type: 'error',
+  });
+
+  return false;
+}
+
+export async function getGstrJsonData(report: BaseGSTR): Promise<string> {
+  const toDate = report.toDate!;
+  const transferType = report.transferType!;
+  const gstin = await report.fyo.getValue(
+    ModelNameEnum.AccountingSettings,
+    'gstin'
+  );
+
+  const gstData: GSTData = {
+    version: 'GST3.0.4',
+    hash: 'hash',
+    gstin: gstin as string,
+    fp: DateTime.fromISO(toDate).toFormat('MMyyyy'),
+  };
+
+  if (transferType === TransferTypeEnum.B2B) {
+    gstData.b2b = await generateB2bData(report);
+  } else if (transferType === TransferTypeEnum.B2CL) {
+    gstData.b2cl = await generateB2clData(report);
+  } else if (transferType === TransferTypeEnum.B2CS) {
+    gstData.b2cs = generateB2csData(report);
+  }
+
+  return JSON.stringify(gstData);
+}
+
+async function generateB2bData(report: BaseGSTR): Promise<B2BCustomer[]> {
+  const fyo = report.fyo;
+  const b2b: B2BCustomer[] = [];
+
+  const schemaName =
+    report.gstrType === 'GSTR-1'
+      ? ModelNameEnum.SalesInvoiceItem
+      : ModelNameEnum.PurchaseInvoiceItem;
+
+  const parentSchemaName =
+    report.gstrType === 'GSTR-1'
+      ? ModelNameEnum.SalesInvoice
+      : ModelNameEnum.PurchaseInvoice;
+
+  for (const row of report.gstrRows ?? []) {
+    const invRecord: B2BInvRecord = {
+      inum: row.invNo,
+      idt: DateTime.fromJSDate(row.invDate).toFormat('dd-MM-yyyy'),
+      val: row.invAmt,
+      pos: row.gstin && row.gstin.substring(0, 2),
+      rchrg: row.reverseCharge,
+      inv_typ: 'R',
+      itms: [],
+    };
+
+    const exchangeRate = (
+      await fyo.db.getAllRaw(parentSchemaName, {
+        fields: ['exchangeRate'],
+        filters: { name: invRecord.inum },
+      })
+    )[0].exchangeRate as number;
+
+    const items = await fyo.db.getAllRaw(schemaName, {
+      fields: ['amount', 'tax', 'hsnCode'],
+      filters: { parent: invRecord.inum },
+    });
+
+    items.forEach((item) => {
+      const hsnCode = item.hsnCode as number;
+      const tax = item.tax as string;
+      const baseAmount = fyo
+        .pesa((item.amount as string) ?? 0)
+        .mul(exchangeRate);
+
+      const itemRecord: B2BItmRecord = {
+        num: hsnCode,
+        itm_det: {
+          txval: baseAmount.float,
+          rt: GST[tax],
+          csamt: 0,
+          camt: fyo
+            .pesa(CSGST[tax] ?? 0)
+            .mul(baseAmount)
+            .div(100).float,
+          samt: fyo
+            .pesa(CSGST[tax] ?? 0)
+            .mul(baseAmount)
+            .div(100).float,
+          iamt: fyo
+            .pesa(IGST[tax] ?? 0)
+            .mul(baseAmount)
+            .div(100).float,
+        },
+      };
+
+      invRecord.itms.push(itemRecord);
+    });
+
+    const customerRecord = b2b.find((b) => b.ctin === row.gstin);
+    const customer = {
+      ctin: row.gstin,
+      inv: [],
+    } as B2BCustomer;
+
+    if (customerRecord) {
+      customerRecord.inv.push(invRecord);
+    } else {
+      customer.inv.push(invRecord);
+      b2b.push(customer);
+    }
+  }
+
+  return b2b;
+}
+
+async function generateB2clData(
+  report: BaseGSTR
+): Promise<B2CLStateInvoiceRecord[]> {
+  const fyo = report.fyo;
+  const b2cl: B2CLStateInvoiceRecord[] = [];
+  const stateCodeMap = invertMap(codeStateMap);
+
+  const schemaName =
+    report.gstrType === 'GSTR-1'
+      ? ModelNameEnum.SalesInvoiceItem
+      : ModelNameEnum.PurchaseInvoiceItem;
+
+  const parentSchemaName =
+    report.gstrType === 'GSTR-1'
+      ? ModelNameEnum.SalesInvoice
+      : ModelNameEnum.PurchaseInvoice;
+
+  for (const row of report.gstrRows ?? []) {
+    const invRecord: B2CLInvRecord = {
+      inum: row.invNo,
+      idt: DateTime.fromJSDate(row.invDate).toFormat('dd-MM-yyyy'),
+      val: row.invAmt,
+      itms: [],
+    };
+
+    const exchangeRate = (
+      await fyo.db.getAllRaw(parentSchemaName, {
+        fields: ['exchangeRate'],
+        filters: { name: invRecord.inum },
+      })
+    )[0].exchangeRate as number;
+
+    const items = await fyo.db.getAllRaw(schemaName, {
+      fields: ['amount', 'tax', 'hsnCode'],
+      filters: { parent: invRecord.inum },
+    });
+
+    items.forEach((item) => {
+      const hsnCode = item.hsnCode as number;
+      const tax = item.tax as string;
+      const baseAmount = fyo
+        .pesa((item.amount as string) ?? 0)
+        .mul(exchangeRate);
+
+      const itemRecord: B2CLItmRecord = {
+        num: hsnCode,
+        itm_det: {
+          txval: baseAmount.float,
+          rt: GST[tax] ?? 0,
+          csamt: 0,
+          iamt: fyo
+            .pesa(row.rate ?? 0)
+            .mul(baseAmount)
+            .div(100).float,
+        },
+      };
+
+      invRecord.itms.push(itemRecord);
+    });
+
+    const stateRecord = b2cl.find((b) => b.pos === stateCodeMap[row.place]);
+    const stateInvoiceRecord: B2CLStateInvoiceRecord = {
+      pos: stateCodeMap[row.place],
+      inv: [],
+    };
+
+    if (stateRecord) {
+      stateRecord.inv.push(invRecord);
+    } else {
+      stateInvoiceRecord.inv.push(invRecord);
+      b2cl.push(stateInvoiceRecord);
+    }
+  }
+
+  return b2cl;
+}
+
+function generateB2csData(report: BaseGSTR): B2CSInvRecord[] {
+  const stateCodeMap = invertMap(codeStateMap);
+  const b2cs: B2CSInvRecord[] = [];
+
+  for (const row of report.gstrRows ?? []) {
+    const invRecord: B2CSInvRecord = {
+      sply_ty: row.inState ? 'INTRA' : 'INTER',
+      pos: stateCodeMap[row.place],
+      typ: 'OE',
+      txval: row.taxVal,
+      rt: row.rate,
+      iamt: !row.inState ? (row.taxVal * row.rate) / 100 : 0,
+      camt: row.inState ? row.cgstAmt ?? 0 : 0,
+      samt: row.inState ? row.sgstAmt ?? 0 : 0,
+      csamt: 0,
+    };
+
+    b2cs.push(invRecord);
+  }
+
+  return b2cs;
+}
+
+======================================================================
+FILE: reports\GoodsAndServiceTax\GSTR1.ts
+======================================================================
+import { BaseGSTR } from './BaseGSTR';
+import { GSTRType } from './types';
+
+export class GSTR1 extends BaseGSTR {
+  static title = 'GSTR1';
+  static reportName = 'gstr-1';
+
+  gstrType: GSTRType = 'GSTR-1';
+}
+
+======================================================================
+FILE: reports\GoodsAndServiceTax\GSTR2.ts
+======================================================================
+import { BaseGSTR } from './BaseGSTR';
+import { GSTRType } from './types';
+
+export class GSTR2 extends BaseGSTR {
+  static title = 'GSTR2';
+  static reportName = 'gstr-2';
+
+  gstrType: GSTRType = 'GSTR-2';
+}
+
+======================================================================
+FILE: reports\GoodsAndServiceTax\types.ts
+======================================================================
+export enum TransferTypeEnum {
+  'B2B' = 'B2B',
+  'B2CL' = 'B2CL',
+  'B2CS' = 'B2CS',
+  'NR' = 'NR',
+}
+
+export type TransferType = keyof typeof TransferTypeEnum;
+export type GSTRType = 'GSTR-1' | 'GSTR-2';
+export interface GSTRRow {
+  gstin: string;
+  partyName: string;
+  invNo: string;
+  invDate: Date;
+  rate: number;
+  reverseCharge: 'Y' | 'N';
+  inState: boolean;
+  place: string;
+  invAmt: number;
+  taxVal: number;
+  igstAmt?: number;
+  cgstAmt?: number;
+  sgstAmt?: number;
+  exempt?: boolean;
+  nonGST?: boolean;
+  nilRated?: boolean;
+}
+
+======================================================================
+FILE: reports\inventory\helpers.ts
+======================================================================
+import { Fyo } from 'fyo';
+import { StockQueue } from 'models/inventory/stockQueue';
+import { ValuationMethod } from 'models/inventory/types';
+import { ModelNameEnum } from 'models/types';
+import { safeParseFloat, safeParseInt } from 'utils/index';
+import type {
+  ComputedStockLedgerEntry,
+  RawStockLedgerEntry,
+  SerialNumberStatus,
+  StockBalanceEntry,
+} from './types';
+import type { QueryFilter } from 'utils/db/types';
+import type { StockTransfer } from 'models/inventory/StockTransfer';
+
+type Item = string;
+type Location = string;
+type Batch = string;
+
+export async function getRawStockLedgerEntries(
+  fyo: Fyo,
+  filters: QueryFilter = {}
+) {
+  const fieldnames = [
+    'name',
+    'date',
+    'item',
+    'batch',
+    'serialNumber',
+    'rate',
+    'quantity',
+    'location',
+    'referenceName',
+    'referenceType',
+  ];
+
+  return (await fyo.db.getAllRaw(ModelNameEnum.StockLedgerEntry, {
+    fields: fieldnames,
+    filters,
+    orderBy: ['date', 'created', 'name'],
+    order: 'asc',
+  })) as RawStockLedgerEntry[];
+}
+
+export async function getShipmentCOGSAmountFromSLEs(
+  stockTransfer: StockTransfer
+) {
+  const fyo = stockTransfer.fyo;
+  const date = stockTransfer.date ?? new Date();
+  const items = (stockTransfer.items ?? []).filter((i) => i.item);
+  const itemNames = Array.from(new Set(items.map((i) => i.item))) as string[];
+
+  type Item = string;
+  type Batch = string;
+  type Location = string;
+  type Queues = Record<Item, Record<Location, Record<Batch, StockQueue>>>;
+
+  const rawSles = await getRawStockLedgerEntries(fyo, {
+    item: ['in', itemNames],
+    date: ['<=', date.toISOString()],
+  });
+
+  const q: Queues = {};
+  for (const sle of rawSles) {
+    const i = sle.item;
+    const l = sle.location;
+    const b = sle.batch ?? '-';
+
+    q[i] ??= {};
+    q[i][l] ??= {};
+    q[i][l][b] ??= new StockQueue();
+
+    const sq = q[i][l][b];
+    if (sle.quantity > 0) {
+      const rate = fyo.pesa(sle.rate);
+      sq.inward(rate.float, sle.quantity);
+    } else {
+      sq.outward(-sle.quantity);
+    }
+  }
+
+  let total = fyo.pesa(0);
+  for (const item of items) {
+    const i = item.item ?? '-';
+    const l = item.location ?? '-';
+    const b = item.batch ?? '-';
+    const stAmount = item.amount ?? 0;
+
+    if (Object.keys(q).length === 0) {
+      total = total.add(stAmount);
+      continue;
+    }
+
+    const sq = q[i][l][b];
+
+    if (!sq) {
+      total = total.add(stAmount);
+    }
+
+    const stRate = item.rate?.float ?? 0;
+    const stQuantity = item.quantity ?? 0;
+
+    const rate = sq.outward(stQuantity) ?? stRate;
+    const amount = rate * stQuantity;
+
+    total = total.add(amount);
+  }
+
+  return total;
+}
+
+export function getStockLedgerEntries(
+  rawSLEs: RawStockLedgerEntry[],
+  valuationMethod: ValuationMethod
+): ComputedStockLedgerEntry[] {
+  const computedSLEs: ComputedStockLedgerEntry[] = [];
+  const stockQueues: Record<
+    Item,
+    Record<Location, Record<Batch, StockQueue>>
+  > = {};
+
+  for (const sle of rawSLEs) {
+    const name = safeParseInt(sle.name);
+    const date = new Date(sle.date);
+    const rate = safeParseFloat(sle.rate);
+    const { item, location, quantity, referenceName, referenceType } = sle;
+    const batch = sle.batch ?? '';
+    const serialNumber = sle.serialNumber ?? '';
+
+    if (quantity === 0) {
+      continue;
+    }
+
+    stockQueues[item] ??= {};
+    stockQueues[item][location] ??= {};
+    stockQueues[item][location][batch] ??= new StockQueue();
+
+    const q = stockQueues[item][location][batch];
+    const initialValue = q.value;
+
+    let incomingRate: number | null;
+    if (quantity > 0) {
+      incomingRate = q.inward(rate, quantity);
+    } else {
+      incomingRate = q.outward(-quantity);
+    }
+
+    if (incomingRate === null) {
+      continue;
+    }
+
+    const balanceQuantity = q.quantity;
+    let valuationRate = q.fifo;
+    if (valuationMethod === ValuationMethod.MovingAverage) {
+      valuationRate = q.movingAverage;
+    }
+
+    const balanceValue = q.value;
+    const valueChange = balanceValue - initialValue;
+
+    const csle: ComputedStockLedgerEntry = {
+      name,
+      date,
+
+      item,
+      location,
+      batch,
+      serialNumber,
+
+      quantity,
+      balanceQuantity,
+
+      incomingRate,
+      valuationRate,
+
+      balanceValue,
+      valueChange,
+
+      referenceName,
+      referenceType,
+    };
+
+    computedSLEs.push(csle);
+  }
+
+  return computedSLEs;
+}
+
+export function getStockBalanceEntries(
+  computedSLEs: ComputedStockLedgerEntry[],
+  filters: {
+    item?: string;
+    location?: string;
+    fromDate?: string;
+    toDate?: string;
+    batch?: string;
+  },
+  showSerialNumbers = false,
+  serialNumberFilter: SerialNumberStatus = 'All'
+): StockBalanceEntry[] {
+  const sbeMap: Record<
+    Item,
+    Record<Location, Record<Batch, Record<string, StockBalanceEntry>>>
+  > = {};
+
+  const fromDate = filters.fromDate ? Date.parse(filters.fromDate) : null;
+  const toDate = filters.toDate ? Date.parse(filters.toDate) : null;
+
+  for (const sle of computedSLEs) {
+    if (filters.item && sle.item !== filters.item) {
+      continue;
+    }
+
+    if (filters.location && sle.location !== filters.location) {
+      continue;
+    }
+
+    if (filters.batch && sle.batch !== filters.batch) {
+      continue;
+    }
+
+    if (
+      showSerialNumbers &&
+      (!sle.serialNumber || sle.serialNumber.trim() === '')
+    ) {
+      continue;
+    }
+
+    const batch = sle.batch || '';
+    const serialNumber = showSerialNumbers ? sle.serialNumber : '';
+
+    sbeMap[sle.item] ??= {};
+    sbeMap[sle.item][sle.location] ??= {};
+    sbeMap[sle.item][sle.location][batch] ??= {};
+    sbeMap[sle.item][sle.location][batch][serialNumber] ??= getSBE(
+      sle.item,
+      sle.location,
+      batch,
+      serialNumber
+    );
+    const date = sle.date.valueOf();
+
+    if (fromDate && date < fromDate) {
+      const sbe = sbeMap[sle.item][sle.location][batch][serialNumber];
+      updateOpeningBalances(sbe, sle);
+      continue;
+    }
+
+    if (toDate && date > toDate) {
+      continue;
+    }
+
+    const sbe = sbeMap[sle.item][sle.location][batch][serialNumber];
+    updateCurrentBalances(sbe, sle);
+  }
+
+  let entries = Object.values(sbeMap)
+    .map((sbeBatched) =>
+      Object.values(sbeBatched).map((sbes) =>
+        Object.values(sbes).map((sbeWithSN) => Object.values(sbeWithSN))
+      )
+    )
+    .flat(3);
+
+  // Filter by serial number status
+  if (serialNumberFilter === 'In stock') {
+    entries = entries.filter((entry) => entry.balanceQuantity > 0);
+  } else if (serialNumberFilter === 'Out stock') {
+    entries = entries.filter((entry) => entry.balanceQuantity <= 0);
+  }
+
+  return entries;
+}
+
+function getSBE(
+  item: string,
+  location: string,
+  batch: string,
+  serialNumber: string
+): StockBalanceEntry {
+  return {
+    name: 0,
+
+    item,
+    location,
+    batch,
+    serialNumber,
+
+    balanceQuantity: 0,
+    balanceValue: 0,
+
+    openingQuantity: 0,
+    openingValue: 0,
+
+    incomingQuantity: 0,
+    incomingValue: 0,
+
+    outgoingQuantity: 0,
+    outgoingValue: 0,
+
+    valuationRate: 0,
+  };
+}
+
+function updateOpeningBalances(
+  sbe: StockBalanceEntry,
+  sle: ComputedStockLedgerEntry
+) {
+  sbe.openingQuantity += sle.quantity;
+  sbe.openingValue += sle.valueChange;
+
+  sbe.balanceQuantity += sle.quantity;
+  sbe.balanceValue += sle.valueChange;
+}
+
+function updateCurrentBalances(
+  sbe: StockBalanceEntry,
+  sle: ComputedStockLedgerEntry
+) {
+  sbe.balanceQuantity += sle.quantity;
+  sbe.balanceValue += sle.valueChange;
+
+  if (sle.quantity > 0) {
+    sbe.incomingQuantity += sle.quantity;
+    sbe.incomingValue += sle.valueChange;
+  } else {
+    sbe.outgoingQuantity -= sle.quantity;
+    sbe.outgoingValue -= sle.valueChange;
+  }
+
+  sbe.valuationRate = sle.valuationRate;
+}
+
+======================================================================
+FILE: reports\inventory\StockBalance.ts
+======================================================================
+import { t } from 'fyo';
+import { RawValueMap } from 'fyo/core/types';
+import { Action } from 'fyo/model/types';
+import getCommonExportActions from 'reports/commonExporter';
+import { ColumnField, ReportData } from 'reports/types';
+import { Field } from 'schemas/types';
+import { getStockBalanceEntries } from './helpers';
+import { StockLedger } from './StockLedger';
+import { ReferenceType, SerialNumberStatus } from './types';
+
+export class StockBalance extends StockLedger {
+  static title = t`Stock Balance`;
+  static reportName = 'stock-balance';
+  static isInventory = true;
+
+  override ascending = true;
+  override referenceType: ReferenceType = 'All';
+  override referenceName = '';
+
+  showSerialNumbers = false;
+  serialNumberFilter: SerialNumberStatus = 'All';
+
+  override async _getReportData(force?: boolean): Promise<ReportData> {
+    if (this.shouldRefresh || force || !this._rawData?.length) {
+      await this._setRawData();
+    }
+
+    const filters = {
+      item: this.item,
+      location: this.location,
+      batch: this.batch,
+      fromDate: this.fromDate,
+      toDate: this.toDate,
+    };
+
+    const rawData = getStockBalanceEntries(
+      this._rawData ?? [],
+      filters,
+      this.showSerialNumbers,
+      this.serialNumberFilter
+    );
+
+    return rawData.map((sbe, i) => {
+      const row = { ...sbe, name: i + 1 } as RawValueMap;
+      return this._convertRawDataRowToReportRow(row, {
+        incomingQuantity: 'green',
+        outgoingQuantity: 'red',
+        balanceQuantity: null,
+      });
+    });
+  }
+
+  getFilters(): Field[] {
+    const filters = [
+      {
+        fieldtype: 'Link',
+        target: 'Item',
+        placeholder: t`Item`,
+        label: t`Item`,
+        fieldname: 'item',
+      },
+      {
+        fieldtype: 'Link',
+        target: 'Location',
+        placeholder: t`Location`,
+        label: t`Location`,
+        fieldname: 'location',
+      },
+      ...(this.hasBatches
+        ? [
+            {
+              fieldtype: 'Link',
+              target: 'Batch',
+              placeholder: t`Batch`,
+              label: t`Batch`,
+              fieldname: 'batch',
+            },
+          ]
+        : []),
+      {
+        fieldtype: 'Date',
+        placeholder: t`From Date`,
+        label: t`From Date`,
+        fieldname: 'fromDate',
+      },
+      {
+        fieldtype: 'Date',
+        placeholder: t`To Date`,
+        label: t`To Date`,
+        fieldname: 'toDate',
+      },
+      {
+        fieldtype: 'Check',
+        placeholder: t`Serial Number`,
+        label: t`Serial Number`,
+        fieldname: 'showSerialNumbers',
+      },
+      ...(this.showSerialNumbers
+        ? ([
+            {
+              fieldtype: 'Select',
+              options: [
+                { label: t`All`, value: 'All' },
+                { label: t`In stock`, value: 'In stock' },
+                { label: t`Out stock`, value: 'Out stock' },
+              ],
+              placeholder: t`Serial Number Status`,
+              label: t`Serial Number Status`,
+              fieldname: 'serialNumberFilter',
+              default: 'All',
+            },
+          ] as Field[])
+        : []),
+    ] as Field[];
+
+    return filters;
+  }
+
+  getColumns(): ColumnField[] {
+    const batch: ColumnField[] = [];
+    const serialNumber: ColumnField[] = [];
+
+    if (this.hasBatches) {
+      batch.push({
+        fieldname: 'batch',
+        label: 'Batch',
+        fieldtype: 'Link',
+      });
+    }
+
+    if (this.showSerialNumbers && this.hasSerialNumbers) {
+      serialNumber.push({
+        fieldname: 'serialNumber',
+        label: 'Serial Number',
+        fieldtype: 'Data',
+      });
+    }
+
+    return [
+      {
+        fieldname: 'name',
+        label: '#',
+        fieldtype: 'Int',
+        width: 0.5,
+      },
+      {
+        fieldname: 'item',
+        label: 'Item',
+        fieldtype: 'Link',
+      },
+      {
+        fieldname: 'location',
+        label: 'Location',
+        fieldtype: 'Link',
+      },
+      ...batch,
+      ...serialNumber,
+      {
+        fieldname: 'balanceQuantity',
+        label: 'Balance Qty.',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'balanceValue',
+        label: 'Balance Value',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'openingQuantity',
+        label: 'Opening Qty.',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'openingValue',
+        label: 'Opening Value',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'incomingQuantity',
+        label: 'In Qty.',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'incomingValue',
+        label: 'In Value',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'outgoingQuantity',
+        label: 'Out Qty.',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'outgoingValue',
+        label: 'Out Value',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'valuationRate',
+        label: 'Valuation rate',
+        fieldtype: 'Currency',
+      },
+    ];
+  }
+
+  getActions(): Action[] {
+    return getCommonExportActions(this);
+  }
+}
+
+======================================================================
+FILE: reports\inventory\StockLedger.ts
+======================================================================
+import { Fyo, t } from 'fyo';
+import { RawValueMap } from 'fyo/core/types';
+import { Action } from 'fyo/model/types';
+import { cloneDeep } from 'lodash';
+import { DateTime } from 'luxon';
+import { InventorySettings } from 'models/inventory/InventorySettings';
+import { ValuationMethod } from 'models/inventory/types';
+import { ModelNameEnum } from 'models/types';
+import getCommonExportActions from 'reports/commonExporter';
+import { Report } from 'reports/Report';
+import { ColumnField, ReportCell, ReportData, ReportRow } from 'reports/types';
+import { Field, RawValue } from 'schemas/types';
+import { isNumeric } from 'src/utils';
+import { getRawStockLedgerEntries, getStockLedgerEntries } from './helpers';
+import { ComputedStockLedgerEntry, ReferenceType } from './types';
+
+export class StockLedger extends Report {
+  static title = t`Stock Ledger`;
+  static reportName = 'stock-ledger';
+  static isInventory = true;
+
+  usePagination = true;
+
+  _rawData?: ComputedStockLedgerEntry[];
+  loading = false;
+  shouldRefresh = false;
+
+  item?: string;
+  location?: string;
+  batch?: string;
+  serialNumber?: string;
+  fromDate?: string;
+  toDate?: string;
+  ascending?: boolean;
+  referenceType?: ReferenceType = 'All';
+  referenceName?: string;
+
+  groupBy: 'none' | 'item' | 'location' = 'none';
+
+  get hasBatches(): boolean {
+    return !!(this.fyo.singles.InventorySettings as InventorySettings)
+      .enableBatches;
+  }
+
+  get hasSerialNumbers(): boolean {
+    return !!(this.fyo.singles.InventorySettings as InventorySettings)
+      .enableSerialNumber;
+  }
+
+  constructor(fyo: Fyo) {
+    super(fyo);
+    this._setObservers();
+  }
+
+  setDefaultFilters() {
+    if (!this.toDate) {
+      this.toDate = DateTime.now().plus({ days: 1 }).toISODate();
+      this.fromDate = DateTime.now().minus({ years: 1 }).toISODate();
+    }
+  }
+
+  async setReportData(
+    filter?: string | undefined,
+    force?: boolean | undefined
+  ): Promise<void> {
+    this.loading = true;
+    this.reportData = await this._getReportData(force);
+    this.loading = false;
+  }
+
+  async _getReportData(force?: boolean): Promise<ReportData> {
+    if (this.shouldRefresh || force || !this._rawData?.length) {
+      await this._setRawData();
+    }
+
+    const rawData = cloneDeep(this._rawData);
+    if (!rawData) {
+      return [];
+    }
+
+    const filtered = this._getFilteredRawData(rawData);
+    const grouped = this._getGroupedRawData(filtered);
+
+    return grouped.map((row) =>
+      this._convertRawDataRowToReportRow(row as RawValueMap, {
+        quantity: null,
+        valueChange: null,
+      })
+    );
+  }
+
+  async _setRawData() {
+    const valuationMethod = ValuationMethod.FIFO;
+
+    const rawSLEs = await getRawStockLedgerEntries(this.fyo);
+    this._rawData = getStockLedgerEntries(rawSLEs, valuationMethod);
+  }
+
+  _getFilteredRawData(rawData: ComputedStockLedgerEntry[]) {
+    const filteredRawData: ComputedStockLedgerEntry[] = [];
+    if (!rawData.length) {
+      return [];
+    }
+
+    const fromDate = this.fromDate ? Date.parse(this.fromDate) : null;
+    const toDate = this.toDate ? Date.parse(this.toDate) : null;
+
+    if (!this.ascending) {
+      rawData.reverse();
+    }
+
+    let i = 0;
+    for (let idx = 0; idx < rawData.length; idx++) {
+      const row = rawData[idx];
+      if (this.item && row.item !== this.item) {
+        continue;
+      }
+
+      if (this.location && row.location !== this.location) {
+        continue;
+      }
+
+      if (this.batch && row.batch !== this.batch) {
+        continue;
+      }
+
+      const date = row.date.valueOf();
+      if (toDate && date > toDate) {
+        continue;
+      }
+
+      if (fromDate && date < fromDate) {
+        continue;
+      }
+
+      if (
+        this.referenceType !== 'All' &&
+        row.referenceType !== this.referenceType
+      ) {
+        continue;
+      }
+
+      if (this.referenceName && row.referenceName !== this.referenceName) {
+        continue;
+      }
+
+      row.name = ++i;
+      filteredRawData.push(row);
+    }
+
+    return filteredRawData;
+  }
+
+  _getGroupedRawData(rawData: ComputedStockLedgerEntry[]) {
+    const groupBy = this.groupBy;
+    if (groupBy === 'none') {
+      return rawData;
+    }
+
+    const groups: Map<string, ComputedStockLedgerEntry[]> = new Map();
+    for (const row of rawData) {
+      const key = row[groupBy];
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+
+      groups.get(key)?.push(row);
+    }
+
+    const groupedRawData: (ComputedStockLedgerEntry | { name: null })[] = [];
+    let i = 0;
+    for (const key of groups.keys()) {
+      for (const row of groups.get(key) ?? []) {
+        row.name = ++i;
+        groupedRawData.push(row);
+      }
+
+      groupedRawData.push({ name: null });
+    }
+
+    if (groupedRawData.at(-1)?.name === null) {
+      groupedRawData.pop();
+    }
+
+    return groupedRawData;
+  }
+
+  _convertRawDataRowToReportRow(
+    row: RawValueMap,
+    colouredMap: Record<string, 'red' | 'green' | null>
+  ): ReportRow {
+    const cells: ReportCell[] = [];
+    const columns = this.getColumns();
+
+    if (row.name === null) {
+      return {
+        isEmpty: true,
+        cells: columns.map((c) => ({
+          rawValue: '',
+          value: '',
+          width: c.width ?? 1,
+        })),
+      };
+    }
+
+    for (const col of columns) {
+      const fieldname = col.fieldname as keyof ComputedStockLedgerEntry;
+      const fieldtype = col.fieldtype;
+
+      const rawValue = row[fieldname] as RawValue;
+
+      let value;
+      if (col.fieldname === 'referenceType' && typeof rawValue === 'string') {
+        value = this.fyo.schemaMap[rawValue]?.label ?? rawValue;
+      } else {
+        value = this.fyo.format(rawValue, fieldtype);
+      }
+
+      const align = isNumeric(fieldtype) ? 'right' : 'left';
+
+      const isColoured = fieldname in colouredMap;
+      const isNumber = typeof rawValue === 'number';
+      let color: 'red' | 'green' | undefined = undefined;
+
+      if (isColoured && colouredMap[fieldname]) {
+        color = colouredMap[fieldname]!;
+      } else if (isColoured && isNumber && rawValue > 0) {
+        color = 'green';
+      } else if (isColoured && isNumber && rawValue < 0) {
+        color = 'red';
+      }
+
+      cells.push({ rawValue, value, align, color, width: col.width });
+    }
+
+    return { cells };
+  }
+
+  _setObservers() {
+    const listener = () => (this.shouldRefresh = true);
+
+    this.fyo.doc.observer.on(
+      `sync:${ModelNameEnum.StockLedgerEntry}`,
+      listener
+    );
+
+    this.fyo.doc.observer.on(
+      `delete:${ModelNameEnum.StockLedgerEntry}`,
+      listener
+    );
+  }
+
+  getColumns(): ColumnField[] {
+    const batch: Field[] = [];
+    const serialNumber: Field[] = [];
+
+    if (this.hasBatches) {
+      batch.push({
+        fieldname: 'batch',
+        label: 'Batch',
+        fieldtype: 'Link',
+        target: 'Batch',
+      });
+    }
+
+    if (this.hasSerialNumbers) {
+      serialNumber.push({
+        fieldname: 'serialNumber',
+        label: 'Serial Number',
+        fieldtype: 'Data',
+      });
+    }
+
+    return [
+      {
+        fieldname: 'name',
+        label: '#',
+        fieldtype: 'Int',
+        width: 0.5,
+      },
+      {
+        fieldname: 'date',
+        label: 'Date',
+        fieldtype: 'Datetime',
+        width: 1.25,
+      },
+      {
+        fieldname: 'item',
+        label: 'Item',
+        fieldtype: 'Link',
+      },
+      {
+        fieldname: 'location',
+        label: 'Location',
+        fieldtype: 'Link',
+      },
+      ...batch,
+      ...serialNumber,
+      {
+        fieldname: 'quantity',
+        label: 'Quantity',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'balanceQuantity',
+        label: 'Balance Qty.',
+        fieldtype: 'Float',
+      },
+      {
+        fieldname: 'incomingRate',
+        label: 'Incoming rate',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'valuationRate',
+        label: 'Valuation Rate',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'balanceValue',
+        label: 'Balance Value',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'valueChange',
+        label: 'Value Change',
+        fieldtype: 'Currency',
+      },
+      {
+        fieldname: 'referenceName',
+        label: 'Ref. Name',
+        fieldtype: 'DynamicLink',
+      },
+      {
+        fieldname: 'referenceType',
+        label: 'Ref. Type',
+        fieldtype: 'Data',
+      },
+    ];
+  }
+
+  getFilters(): Field[] {
+    return [
+      {
+        fieldtype: 'Select',
+        options: [
+          { label: t`All`, value: 'All' },
+          { label: t`Stock Movements`, value: 'StockMovement' },
+          { label: t`Shipment`, value: 'Shipment' },
+          { label: t`Purchase Receipt`, value: 'PurchaseReceipt' },
+        ],
+        label: t`Ref Type`,
+        fieldname: 'referenceType',
+        placeholder: t`Ref Type`,
+      },
+      {
+        fieldtype: 'DynamicLink',
+        label: t`Ref Name`,
+        references: 'referenceType',
+        placeholder: t`Ref Name`,
+        emptyMessage: t`Change Ref Type`,
+        fieldname: 'referenceName',
+      },
+      {
+        fieldtype: 'Link',
+        target: 'Item',
+        placeholder: t`Item`,
+        label: t`Item`,
+        fieldname: 'item',
+      },
+      {
+        fieldtype: 'Link',
+        target: 'Location',
+        placeholder: t`Location`,
+        label: t`Location`,
+        fieldname: 'location',
+      },
+      ...(this.hasBatches
+        ? ([
+            {
+              fieldtype: 'Link',
+              target: 'Batch',
+              placeholder: t`Batch`,
+              label: t`Batch`,
+              fieldname: 'batch',
+            },
+          ] as Field[])
+        : []),
+      {
+        fieldtype: 'Date',
+        placeholder: t`From Date`,
+        label: t`From Date`,
+        fieldname: 'fromDate',
+      },
+      {
+        fieldtype: 'Date',
+        placeholder: t`To Date`,
+        label: t`To Date`,
+        fieldname: 'toDate',
+      },
+      {
+        fieldtype: 'Select',
+        label: t`Group By`,
+        fieldname: 'groupBy',
+        options: [
+          { label: t`None`, value: 'none' },
+          { label: t`Item`, value: 'item' },
+          { label: t`Location`, value: 'location' },
+          { label: t`Reference`, value: 'referenceName' },
+        ],
+      },
+      {
+        fieldtype: 'Check',
+        label: t`Ascending Order`,
+        fieldname: 'ascending',
+      },
+    ] as Field[];
+  }
+
+  getActions(): Action[] {
+    return getCommonExportActions(this);
+  }
+}
+
+======================================================================
+FILE: reports\inventory\types.ts
+======================================================================
+import { ModelNameEnum } from "models/types";
+
+export interface RawStockLedgerEntry {
+  name: string;
+  date: string;
+  item: string;
+  rate: string;
+  batch: string | null;
+  serialNumber: string | null;
+  quantity: number;
+  location: string;
+  referenceName: string;
+  referenceType: string;
+  [key: string]: unknown;
+}
+
+
+export interface ComputedStockLedgerEntry{
+  name: number;
+  date: Date;
+
+  item: string;
+  location:string;
+  batch: string;
+  serialNumber: string;
+
+  quantity: number;
+  balanceQuantity: number;
+
+  incomingRate: number;
+  valuationRate:number;
+
+  balanceValue:number;
+  valueChange:number;
+  
+  referenceName: string;
+  referenceType: string;
+}
+
+
+export interface StockBalanceEntry{
+  name: number;
+
+  item: string;
+  location:string;
+  batch: string;
+  serialNumber: string;
+
+  balanceQuantity: number;
+  balanceValue: number;
+
+  openingQuantity: number;
+  openingValue:number;
+
+  incomingQuantity:number;
+  incomingValue:number;
+
+  outgoingQuantity:number;
+  outgoingValue:number;
+
+  valuationRate:number;
+}
+
+export type ReferenceType =
+  | ModelNameEnum.StockMovement
+  | ModelNameEnum.Shipment
+  | ModelNameEnum.PurchaseReceipt
+  | 'All';
+
+export type SerialNumberStatus = 'All' | 'In stock' | 'Out stock';
+
+
+======================================================================
+FILE: reports\ProfitAndLoss\ProfitAndLoss.ts
+======================================================================
+import { t } from 'fyo';
+import {
+  AccountRootType,
+  AccountRootTypeEnum,
+} from 'models/baseModels/Account/types';
+import {
+  AccountReport,
+  convertAccountRootNodesToAccountList,
+} from 'reports/AccountReport';
+import {
+  AccountListNode,
+  AccountTreeNode,
+  ReportData,
+  ValueMap,
+} from 'reports/types';
+
+export class ProfitAndLoss extends AccountReport {
+  static title = t`Profit And Loss`;
+  static reportName = 'profit-and-loss';
+  loading = false;
+
+  get rootTypes(): AccountRootType[] {
+    return [AccountRootTypeEnum.Income, AccountRootTypeEnum.Expense];
+  }
+
+  async setReportData(filter?: string, force?: boolean) {
+    this.loading = true;
+    if (force || filter !== 'hideGroupAmounts') {
+      await this._setRawData();
+    }
+
+    const map = this._getGroupedMap(true, 'account');
+    const rangeGroupedMap = await this._getGroupedByDateRanges(map);
+    const accountTree = await this._getAccountTree(rangeGroupedMap);
+
+    for (const name of Object.keys(accountTree)) {
+      const { rootType } = accountTree[name];
+      if (this.rootTypes.includes(rootType)) {
+        continue;
+      }
+
+      delete accountTree[name];
+    }
+
+    /**
+     * Income Rows
+     */
+    const incomeRoots = this.getRootNodes(
+      AccountRootTypeEnum.Income,
+      accountTree
+    )!;
+    const incomeList = convertAccountRootNodesToAccountList(incomeRoots);
+    const incomeRows = this.getReportRowsFromAccountList(incomeList);
+
+    /**
+     * Expense Rows
+     */
+    const expenseRoots = this.getRootNodes(
+      AccountRootTypeEnum.Expense,
+      accountTree
+    )!;
+    const expenseList = convertAccountRootNodesToAccountList(expenseRoots);
+    const expenseRows = this.getReportRowsFromAccountList(expenseList);
+
+    this.reportData = this.getReportDataFromRows(
+      incomeRows,
+      expenseRows,
+      incomeRoots,
+      expenseRoots
+    );
+    this.loading = false;
+  }
+
+  getReportDataFromRows(
+    incomeRows: ReportData,
+    expenseRows: ReportData,
+    incomeRoots: AccountTreeNode[] | undefined,
+    expenseRoots: AccountTreeNode[] | undefined
+  ): ReportData {
+    if (
+      incomeRoots &&
+      incomeRoots.length &&
+      !expenseRoots &&
+      !expenseRoots.length
+    ) {
+      return this.getIncomeOrExpenseRows(
+        incomeRoots,
+        incomeRows,
+        t`Total Income (Credit)`
+      );
+    }
+
+    if (
+      expenseRoots &&
+      expenseRoots.length &&
+      (!incomeRoots || !incomeRoots.length)
+    ) {
+      return this.getIncomeOrExpenseRows(
+        expenseRoots,
+        expenseRows,
+        t`Total Income (Credit)`
+      );
+    }
+
+    if (
+      !incomeRoots ||
+      !incomeRoots.length ||
+      !expenseRoots ||
+      !expenseRoots.length
+    ) {
+      return [];
+    }
+
+    return this.getIncomeAndExpenseRows(
+      incomeRows,
+      expenseRows,
+      incomeRoots,
+      expenseRoots
+    );
+  }
+
+  getIncomeOrExpenseRows(
+    roots: AccountTreeNode[],
+    rows: ReportData,
+    totalRowName: string
+  ): ReportData {
+    const total = this.getTotalNode(roots, totalRowName);
+    const totalRow = this.getRowFromAccountListNode(total);
+
+    return [rows, totalRow].flat();
+  }
+
+  getIncomeAndExpenseRows(
+    incomeRows: ReportData,
+    expenseRows: ReportData,
+    incomeRoots: AccountTreeNode[],
+    expenseRoots: AccountTreeNode[]
+  ) {
+    const totalIncome = this.getTotalNode(
+      incomeRoots,
+      t`Total Income (Credit)`
+    );
+    const totalIncomeRow = this.getRowFromAccountListNode(totalIncome);
+
+    const totalExpense = this.getTotalNode(
+      expenseRoots,
+      t`Total Expense (Debit)`
+    );
+    const totalExpenseRow = this.getRowFromAccountListNode(totalExpense);
+
+    const totalValueMap: ValueMap = new Map();
+    for (const key of totalIncome.valueMap!.keys()) {
+      const income = totalIncome.valueMap!.get(key)?.balance ?? 0;
+      const expense = totalExpense.valueMap!.get(key)?.balance ?? 0;
+      totalValueMap.set(key, { balance: income - expense });
+    }
+
+    const totalProfit = {
+      name: t`Total Profit`,
+      valueMap: totalValueMap,
+      level: 0,
+    } as AccountListNode;
+
+    const totalProfitRow = this.getRowFromAccountListNode(totalProfit);
+    totalProfitRow.cells.forEach((c) => {
+      c.bold = true;
+      if (typeof c.rawValue !== 'number') {
+        return;
+      }
+
+      if (c.rawValue > 0) {
+        c.color = 'green';
+      } else if (c.rawValue < 0) {
+        c.color = 'red';
+      }
+    });
+
+    const emptyRow = this.getEmptyRow();
+
+    return [
+      incomeRows,
+      totalIncomeRow,
+      emptyRow,
+      expenseRows,
+      totalExpenseRow,
+      emptyRow,
+      totalProfitRow,
+    ].flat() as ReportData;
+  }
+}
+
+======================================================================
+FILE: reports\TrialBalance\TrialBalance.ts
+======================================================================
+import { t } from 'fyo';
+import { ValueError } from 'fyo/utils/errors';
+import { DateTime } from 'luxon';
+import {
+  AccountRootType,
+  AccountRootTypeEnum,
+} from 'models/baseModels/Account/types';
+import {
+  AccountReport,
+  ACC_BAL_WIDTH,
+  ACC_NAME_WIDTH,
+  convertAccountRootNodesToAccountList,
+  getFiscalEndpoints,
+} from 'reports/AccountReport';
+import {
+  Account,
+  AccountListNode,
+  AccountNameValueMapMap,
+  ColumnField,
+  DateRange,
+  GroupedMap,
+  LedgerEntry,
+  ReportCell,
+  ReportData,
+  ReportRow,
+  RootTypeRow,
+  ValueMap,
+} from 'reports/types';
+import { Field } from 'schemas/types';
+import { QueryFilter } from 'utils/db/types';
+
+export class TrialBalance extends AccountReport {
+  static title = t`Trial Balance`;
+  static reportName = 'trial-balance';
+
+  fromDate?: string;
+  toDate?: string;
+  hideGroupAmounts = false;
+  loading = false;
+
+  _rawData: LedgerEntry[] = [];
+  _dateRanges?: DateRange[];
+
+  accountMap?: Record<string, Account>;
+
+  get rootTypes(): AccountRootType[] {
+    return [
+      AccountRootTypeEnum.Asset,
+      AccountRootTypeEnum.Liability,
+      AccountRootTypeEnum.Income,
+      AccountRootTypeEnum.Expense,
+      AccountRootTypeEnum.Equity,
+    ];
+  }
+
+  async setReportData(filter?: string, force?: boolean) {
+    this.loading = true;
+    if (force || filter !== 'hideGroupAmounts') {
+      await this._setRawData();
+    }
+
+    const map = this._getGroupedMap(true, 'account');
+    const rangeGroupedMap = await this._getGroupedByDateRanges(map);
+    const accountTree = await this._getAccountTree(rangeGroupedMap);
+
+    const rootTypeRows: RootTypeRow[] = this.rootTypes
+      .map((rootType) => {
+        const rootNodes = this.getRootNodes(rootType, accountTree)!;
+        const rootList = convertAccountRootNodesToAccountList(rootNodes);
+        return {
+          rootType,
+          rootNodes,
+          rows: this.getReportRowsFromAccountList(rootList),
+        };
+      })
+      .filter((row) => !!(row.rootNodes && row.rootNodes.length));
+
+    this.reportData = await this.getReportDataFromRows(rootTypeRows);
+    this.loading = false;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async getReportDataFromRows(
+    rootTypeRows: RootTypeRow[]
+  ): Promise<ReportData> {
+    const reportData = rootTypeRows.reduce((reportData, r) => {
+      reportData.push(...r.rows);
+      reportData.push(this.getEmptyRow());
+      return reportData;
+    }, [] as ReportData);
+
+    reportData.pop();
+
+    return reportData;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async _getGroupedByDateRanges(
+    map: GroupedMap
+  ): Promise<AccountNameValueMapMap> {
+    const accountValueMap: AccountNameValueMapMap = new Map();
+
+    for (const account of map.keys()) {
+      const valueMap: ValueMap = new Map();
+
+      /**
+       * Set Balance for every DateRange key
+       */
+      for (const entry of map.get(account)!) {
+        const key = this._getRangeMapKey(entry);
+        if (key === null) {
+          throw new ValueError(
+            `invalid entry in trial balance ${entry.date?.toISOString() ?? ''}`
+          );
+        }
+
+        const map = valueMap.get(key);
+        const totalCredit = map?.credit ?? 0;
+        const totalDebit = map?.debit ?? 0;
+
+        valueMap.set(key, {
+          credit: totalCredit + (entry.credit ?? 0),
+          debit: totalDebit + (entry.debit ?? 0),
+        });
+      }
+
+      accountValueMap.set(account, valueMap);
+    }
+
+    return accountValueMap;
+  }
+
+  async _getDateRanges(): Promise<DateRange[]> {
+    if (!this.toDate || !this.fromDate) {
+      await this.setDefaultFilters();
+    }
+
+    const toDate = DateTime.fromISO(this.toDate!);
+    const fromDate = DateTime.fromISO(this.fromDate!);
+
+    return [
+      {
+        fromDate: DateTime.fromISO('0001-01-01'),
+        toDate: fromDate,
+      },
+      { fromDate, toDate },
+      {
+        fromDate: toDate,
+        toDate: DateTime.fromISO('9999-12-31'),
+      },
+    ];
+  }
+
+  getRowFromAccountListNode(al: AccountListNode) {
+    const nameCell = {
+      value: al.name,
+      rawValue: al.name,
+      align: 'left',
+      width: ACC_NAME_WIDTH,
+      bold: !al.level,
+      indent: al.level ?? 0,
+    } as ReportCell;
+
+    const balanceCells = this._dateRanges!.map((k) => {
+      const map = al.valueMap?.get(k);
+      const hide = this.hideGroupAmounts && al.isGroup;
+
+      return [
+        {
+          rawValue: map?.debit ?? 0,
+          value: hide ? '' : this.fyo.format(map?.debit ?? 0, 'Currency'),
+          align: 'right',
+          width: ACC_BAL_WIDTH,
+        },
+        {
+          rawValue: map?.credit ?? 0,
+          value: hide ? '' : this.fyo.format(map?.credit ?? 0, 'Currency'),
+          align: 'right',
+          width: ACC_BAL_WIDTH,
+        } as ReportCell,
+      ];
+    });
+
+    return {
+      cells: [nameCell, balanceCells].flat(2),
+      level: al.level,
+      isGroup: !!al.isGroup,
+      folded: false,
+      foldedBelow: false,
+    } as ReportRow;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async _getQueryFilters(): Promise<QueryFilter> {
+    const filters: QueryFilter = {};
+    filters.reverted = false;
+    return filters;
+  }
+
+  async setDefaultFilters(): Promise<void> {
+    if (!this.toDate || !this.fromDate) {
+      const { year } = DateTime.now();
+      const endpoints = await getFiscalEndpoints(year + 1, year, this.fyo);
+
+      this.fromDate = endpoints.fromDate;
+      this.toDate = DateTime.fromISO(endpoints.toDate)
+        .minus({ days: 1 })
+        .toISODate();
+    }
+
+    await this._setDateRanges();
+  }
+
+  getFilters(): Field[] {
+    return [
+      {
+        fieldtype: 'Date',
+        fieldname: 'fromDate',
+        placeholder: t`From Date`,
+        label: t`From Date`,
+        required: true,
+      },
+      {
+        fieldtype: 'Date',
+        fieldname: 'toDate',
+        placeholder: t`To Date`,
+        label: t`To Date`,
+        required: true,
+      },
+      {
+        fieldtype: 'Check',
+        label: t`Hide Group Amounts`,
+        fieldname: 'hideGroupAmounts',
+      } as Field,
+    ] as Field[];
+  }
+
+  getColumns(): ColumnField[] {
+    return [
+      {
+        label: t`Account`,
+        fieldtype: 'Link',
+        fieldname: 'account',
+        align: 'left',
+        width: ACC_NAME_WIDTH,
+      },
+      {
+        label: t`Opening (Dr)`,
+        fieldtype: 'Data',
+        fieldname: 'openingDebit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+      {
+        label: t`Opening (Cr)`,
+        fieldtype: 'Data',
+        fieldname: 'openingCredit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+      {
+        label: t`Debit`,
+        fieldtype: 'Data',
+        fieldname: 'debit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+      {
+        label: t`Credit`,
+        fieldtype: 'Data',
+        fieldname: 'credit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+      {
+        label: t`Closing (Dr)`,
+        fieldtype: 'Data',
+        fieldname: 'closingDebit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+      {
+        label: t`Closing (Cr)`,
+        fieldtype: 'Data',
+        fieldname: 'closingCredit',
+        align: 'right',
+        width: ACC_BAL_WIDTH,
+      },
+    ] as ColumnField[];
+  }
+}
+

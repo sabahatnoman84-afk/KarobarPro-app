@@ -1,0 +1,2841 @@
+﻿
+=== SRC ROOT FILES ===
+=== FILE: src\App.vue (9.91 KB) ===
+<template>
+  <div
+    id="app"
+    class="
+      dark:bg-gray-900
+      h-screen
+      flex flex-col
+      font-sans
+      overflow-hidden
+      antialiased
+    "
+    :dir="languageDirection"
+    :language="language"
+  >
+    <WindowsTitleBar
+      v-if="platform === 'Windows'"
+      :db-path="dbPath"
+      :company-name="companyName"
+    />
+    <!-- Main Contents -->
+    <Desk
+      v-if="activeScreen === 'Desk'"
+      class="flex-1"
+      :dark-mode="darkMode"
+      @change-db-file="showDbSelector"
+    />
+    <DatabaseSelector
+      v-if="activeScreen === 'DatabaseSelector'"
+      ref="databaseSelector"
+      @new-database="newDatabase"
+      @file-selected="fileSelected"
+    />
+    <SetupWizard
+      v-if="activeScreen === 'SetupWizard'"
+      @setup-complete="setupComplete"
+      @setup-canceled="showDbSelector"
+    />
+
+    <!-- Render target for toasts -->
+    <div
+      id="toast-container"
+      class="absolute bottom-0 flex flex-col items-end mb-3 pe-6"
+      style="width: 100%; pointer-events: none"
+    ></div>
+  </div>
+</template>
+<script lang="ts">
+import { RTL_LANGUAGES } from 'fyo/utils/consts';
+import { ModelNameEnum } from 'models/types';
+import { systemLanguageRef } from 'src/utils/refs';
+import { defineComponent, provide, ref, Ref } from 'vue';
+import WindowsTitleBar from './components/WindowsTitleBar.vue';
+import { handleErrorWithDialog } from './errorHandling';
+import { fyo } from './initFyo';
+import DatabaseSelector from './pages/DatabaseSelector.vue';
+import Desk from './pages/Desk.vue';
+import SetupWizard from './pages/SetupWizard/SetupWizard.vue';
+import setupInstance from './setup/setupInstance';
+import { SetupWizardOptions } from './setup/types';
+import './styles/index.css';
+import { connectToDatabase, dbErrorActionSymbols } from './utils/db';
+import { initializeInstance } from './utils/initialization';
+import * as injectionKeys from './utils/injectionKeys';
+import { showDialog, showToast } from './utils/interactive';
+import { setLanguageMap } from './utils/language';
+import { updateConfigFiles } from './utils/misc';
+import { updatePrintTemplates } from './utils/printTemplates';
+import { Search } from './utils/search';
+import { Shortcuts } from './utils/shortcuts';
+import { routeTo } from './utils/ui';
+import { useKeys } from './utils/vueUtils';
+import { setDarkMode } from 'src/utils/theme';
+import {
+  registerInstanceToERPNext,
+  updateERPNSyncSettings,
+} from './utils/erpnextSync';
+import { ERPNextSyncSettings } from 'models/baseModels/ERPNextSyncSettings/ERPNextSyncSettings';
+import { ErrorLogEnum } from 'fyo/telemetry/types';
+
+enum Screen {
+  Desk = 'Desk',
+  DatabaseSelector = 'DatabaseSelector',
+  SetupWizard = 'SetupWizard',
+}
+
+export default defineComponent({
+  name: 'App',
+  components: {
+    Desk,
+    SetupWizard,
+    DatabaseSelector,
+    WindowsTitleBar,
+  },
+  setup() {
+    const keys = useKeys();
+    const searcher: Ref<null | Search> = ref(null);
+    const shortcuts = new Shortcuts(keys);
+    const languageDirection = ref(
+      getLanguageDirection(systemLanguageRef.value)
+    );
+
+    provide(injectionKeys.keysKey, keys);
+    provide(injectionKeys.searcherKey, searcher);
+    provide(injectionKeys.shortcutsKey, shortcuts);
+    provide(injectionKeys.languageDirectionKey, languageDirection);
+
+    const databaseSelector = ref<InstanceType<typeof DatabaseSelector> | null>(
+      null
+    );
+
+    return {
+      keys,
+      searcher,
+      shortcuts,
+      languageDirection,
+      databaseSelector,
+    };
+  },
+  data() {
+    return {
+      activeScreen: null,
+      dbPath: '',
+      companyName: '',
+      darkMode: false,
+    } as {
+      activeScreen: null | Screen;
+      dbPath: string;
+      companyName: string;
+      darkMode: boolean | undefined;
+    };
+  },
+  computed: {
+    language(): string {
+      return systemLanguageRef.value;
+    },
+  },
+  watch: {
+    language(value: string) {
+      this.languageDirection = getLanguageDirection(value);
+    },
+  },
+  async mounted() {
+    await this.setInitialScreen();
+    const darkMode = !!fyo.singles.SystemSettings?.darkMode;
+    setDarkMode(darkMode);
+    this.darkMode = darkMode;
+  },
+  methods: {
+    async setInitialScreen(): Promise<void> {
+      const lastSelectedFilePath = fyo.config.get('lastSelectedFilePath', null);
+
+      if (
+        typeof lastSelectedFilePath !== 'string' ||
+        !lastSelectedFilePath.length
+      ) {
+        this.activeScreen = Screen.DatabaseSelector;
+        return;
+      }
+
+      await this.fileSelected(lastSelectedFilePath);
+    },
+    async setSearcher(): Promise<void> {
+      this.searcher = new Search(fyo);
+      await this.searcher.initializeKeywords();
+    },
+    async setDesk(filePath: string): Promise<void> {
+      await setLanguageMap();
+      this.activeScreen = Screen.Desk;
+      await this.setDeskRoute();
+      await fyo.telemetry.start(true);
+      await ipc.checkForUpdates();
+      this.dbPath = filePath;
+      this.companyName = (await fyo.getValue(
+        ModelNameEnum.AccountingSettings,
+        'companyName'
+      )) as string;
+      await this.setSearcher();
+      updateConfigFiles(fyo);
+    },
+    newDatabase() {
+      this.activeScreen = Screen.SetupWizard;
+    },
+    async fileSelected(filePath: string): Promise<void> {
+      fyo.config.set('lastSelectedFilePath', filePath);
+      if (filePath !== ':memory:' && !(await ipc.checkDbAccess(filePath))) {
+        await showDialog({
+          title: this.t`Cannot open file`,
+          type: 'error',
+          detail: this
+            .t`KarobarPro does not have access to the selected file: ${filePath}`,
+        });
+
+        fyo.config.set('lastSelectedFilePath', null);
+        return;
+      }
+
+      try {
+        await this.showSetupWizardOrDesk(filePath);
+      } catch (error) {
+        await handleErrorWithDialog(error, undefined, true, true);
+        await this.showDbSelector();
+      }
+    },
+    async setupComplete(setupWizardOptions: SetupWizardOptions): Promise<void> {
+      const companyName = setupWizardOptions.companyName;
+      const filePath = await ipc.getDbDefaultPath(companyName);
+      await setupInstance(filePath, setupWizardOptions, fyo);
+      fyo.config.set('lastSelectedFilePath', filePath);
+      await this.setDesk(filePath);
+    },
+    async showSetupWizardOrDesk(filePath: string): Promise<void> {
+      const { countryCode, error, actionSymbol } = await connectToDatabase(
+        this.fyo,
+        filePath
+      );
+
+      if (!countryCode && error && actionSymbol) {
+        return await this.handleConnectionFailed(error, actionSymbol);
+      }
+
+      const setupComplete = await fyo.getValue(
+        ModelNameEnum.AccountingSettings,
+        'setupComplete'
+      );
+
+      if (!setupComplete) {
+        this.activeScreen = Screen.SetupWizard;
+        return;
+      }
+
+      await initializeInstance(filePath, false, countryCode, fyo);
+      await updatePrintTemplates(fyo);
+
+      const syncSettingsDoc = (await fyo.doc.getDoc(
+        ModelNameEnum.ERPNextSyncSettings
+      )) as ERPNextSyncSettings;
+
+      const baseURL = syncSettingsDoc.baseURL;
+      const token = syncSettingsDoc.authToken;
+      const enableERPNextSync =
+        fyo.singles.AccountingSettings?.enableERPNextSync;
+
+      if (enableERPNextSync && baseURL && token) {
+        try {
+          await registerInstanceToERPNext(fyo);
+          await updateERPNSyncSettings(fyo);
+          await ipc.initScheduler(
+            `${fyo.singles.ERPNextSyncSettings?.dataSyncInterval as string}m`
+          );
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          try {
+            const existing = await fyo.db.getAll(
+              ErrorLogEnum.IntegrationErrorLog,
+              {
+                filters: {
+                  error: errorMessage,
+                },
+                limit: 1,
+              }
+            );
+
+            if (!existing.length) {
+              await fyo.doc
+                .getNewDoc(ErrorLogEnum.IntegrationErrorLog, {
+                  error: errorMessage,
+                  data: JSON.stringify({
+                    instance: fyo.singles.ERPNextSyncSettings?.deviceID,
+                    operation: 'register_instance',
+                    trigger: 'showSetupWizardOrDesk',
+                    baseURL: baseURL,
+                  }),
+                })
+                .sync();
+            }
+          } catch (logError) {
+            throw logError;
+          }
+          showToast({ message: 'Connection Failed', type: 'error' });
+        }
+      }
+
+      await this.setDesk(filePath);
+    },
+    async handleConnectionFailed(error: Error, actionSymbol: symbol) {
+      await this.showDbSelector();
+
+      if (actionSymbol === dbErrorActionSymbols.CancelSelection) {
+        return;
+      }
+
+      if (actionSymbol === dbErrorActionSymbols.SelectFile) {
+        await this.databaseSelector?.existingDatabase();
+        return;
+      }
+
+      throw error;
+    },
+    async setDeskRoute(): Promise<void> {
+      const { onboardingComplete } = await fyo.doc.getDoc('GetStarted');
+      const { hideGetStarted } = await fyo.doc.getDoc('SystemSettings');
+
+      let route = '/get-started';
+      if (hideGetStarted || onboardingComplete) {
+        route = localStorage.getItem('lastRoute') || '/';
+      }
+
+      await routeTo(route);
+    },
+    async showDbSelector(): Promise<void> {
+      localStorage.clear();
+      fyo.config.set('lastSelectedFilePath', null);
+      fyo.telemetry.stop();
+      await fyo.purgeCache();
+      this.activeScreen = Screen.DatabaseSelector;
+      this.dbPath = '';
+      this.searcher = null;
+      this.companyName = '';
+    },
+  },
+});
+
+function getLanguageDirection(language: string): 'rtl' | 'ltr' {
+  return RTL_LANGUAGES.includes(language) ? 'rtl' : 'ltr';
+}
+</script>
+
+=== FILE: src\errorHandling.ts (8.44 KB) ===
+import { t } from 'fyo';
+import type { Doc } from 'fyo/model/doc';
+import { BaseError } from 'fyo/utils/errors';
+import { ErrorLog } from 'fyo/utils/types';
+import { truncate } from 'lodash';
+import { showDialog } from 'src/utils/interactive';
+import { fyo } from './initFyo';
+import router from './router';
+import { getErrorMessage, stringifyCircular } from './utils';
+import type { DialogOptions, ToastOptions } from './utils/types';
+import { ModelNameEnum } from 'models/types';
+
+function shouldNotStore(error: Error) {
+  const shouldLog = (error as BaseError).shouldStore ?? true;
+  return !shouldLog;
+}
+
+export async function sendError(errorLogObj: ErrorLog) {
+  if (!errorLogObj.stack) {
+    return;
+  }
+
+  errorLogObj.more ??= {};
+  errorLogObj.more.path ??= router.currentRoute.value.fullPath;
+
+  const body = {
+    error_name: errorLogObj.name,
+    message: errorLogObj.message,
+    stack: errorLogObj.stack,
+    platform: fyo.store.platform,
+    version: fyo.store.appVersion,
+    language: fyo.store.language,
+    instance_id: fyo.store.instanceId,
+    device_id: fyo.store.deviceId,
+    open_count: fyo.store.openCount,
+    country_code: fyo.singles.SystemSettings?.countryCode,
+    more: stringifyCircular(errorLogObj.more),
+  };
+
+  if (fyo.store.isDevelopment) {
+    // eslint-disable-next-line no-console
+    console.log('sendError', body);
+  }
+
+  await ipc.sendError(JSON.stringify(body));
+}
+
+function getToastProps(errorLogObj: ErrorLog) {
+  const props: ToastOptions = {
+    message: errorLogObj.name ?? t`Error`,
+    type: 'error',
+    actionText: t`Report Error`,
+    action: () => reportIssue(errorLogObj),
+  };
+
+  return props;
+}
+
+export function getErrorLogObject(
+  error: Error,
+  more: Record<string, unknown>
+): ErrorLog {
+  const { name, stack, message, cause } = error;
+  if (cause) {
+    more.cause = cause;
+  }
+
+  const errorLogObj = { name, stack, message, more };
+
+  fyo.errorLog.push(errorLogObj);
+
+  return errorLogObj;
+}
+
+export async function handleError(
+  logToConsole: boolean,
+  error: Error,
+  more: Record<string, unknown> = {},
+  notifyUser = true
+) {
+  if (logToConsole) {
+    // eslint-disable-next-line no-console
+    console.error(error);
+  }
+
+  if (shouldNotStore(error)) {
+    return;
+  }
+
+  const errorLogObj = getErrorLogObject(error, more);
+  await sendError(errorLogObj);
+
+  if (notifyUser) {
+    const toastProps = getToastProps(errorLogObj);
+    const { showToast } = await import('src/utils/interactive');
+    showToast(toastProps);
+  }
+}
+
+export async function handleErrorWithDialog(
+  error: unknown,
+  doc?: Doc,
+  reportError?: boolean,
+  dontThrow?: boolean
+) {
+  if (!(error instanceof Error)) {
+    return;
+  }
+
+  const errorMessage = getErrorMessage(error, doc);
+  await handleError(false, error, { errorMessage, doc });
+
+  const label = getErrorLabel(error);
+  const options: DialogOptions = {
+    title: label,
+    detail: errorMessage,
+    type: 'error',
+  };
+
+  if (reportError) {
+    options.detail = truncate(String(options.detail), { length: 128 });
+    options.buttons = [
+      {
+        label: t`Report`,
+        action() {
+          reportIssue(getErrorLogObject(error, { errorMessage }));
+        },
+        isPrimary: true,
+      },
+      {
+        label: t`Cancel`,
+        action() {
+          return null;
+        },
+        isEscape: true,
+      },
+    ];
+  }
+
+  await showDialog(options);
+  if (dontThrow) {
+    if (fyo.store.isDevelopment) {
+      // eslint-disable-next-line no-console
+      console.error(error);
+    }
+    return;
+  }
+
+  throw error;
+}
+
+export async function showErrorDialog(title?: string, content?: string) {
+  // To be used for  show stopper errors
+  title ??= t`Error`;
+  content ??= t`Something has gone terribly wrong. Please check the console and raise an issue.`;
+  await ipc.showError(title, content);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function getErrorHandled<T extends (...args: any[]) => Promise<any>>(
+  func: T
+) {
+  type Return = ReturnType<T> extends Promise<infer P> ? P : true;
+  return async function errorHandled(...args: Parameters<T>): Promise<Return> {
+    try {
+      return (await func(...args)) as Return;
+    } catch (error) {
+      await handleError(false, error as Error, {
+        functionName: func.name,
+        functionArgs: args,
+      });
+
+      throw error;
+    }
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function getErrorHandledSync<T extends (...args: any[]) => any>(
+  func: T
+) {
+  type Return = ReturnType<T> extends Promise<infer P> ? P : ReturnType<T>;
+  return function errorHandledSync(...args: Parameters<T>) {
+    try {
+      return func(...args) as Return;
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/no-floating-promises
+      handleError(false, error as Error, {
+        functionName: func.name,
+        functionArgs: args,
+      });
+    }
+  };
+}
+
+function getFeatureFlags(): string[] {
+  const getBooleanFields = (docName: string) => {
+    const doc = fyo.singles[docName];
+
+    return Object.entries(doc as Doc).reduce((acc, [key, value]) => {
+      const fieldsArray = fyo.schemaMap[docName]?.fields ?? [];
+      const fieldsMap = new Map(fieldsArray.map((f) => [f.fieldname, f]));
+
+      const field = fieldsMap.get(key);
+      if (
+        typeof value === 'boolean' &&
+        !field?.hidden &&
+        !key.startsWith('_')
+      ) {
+        acc[key] = value;
+      }
+      return acc;
+    }, {} as Record<string, boolean>);
+  };
+
+  const sections = [
+    {
+      name: 'Accounting',
+      flags: getBooleanFields(ModelNameEnum.AccountingSettings),
+    },
+    { name: 'POS', flags: getBooleanFields(ModelNameEnum.POSSettings) },
+    {
+      name: 'Inventory',
+      flags: getBooleanFields(ModelNameEnum.InventorySettings),
+    },
+  ]
+
+    .filter(({ flags }) => Object.keys(flags).length > 0)
+    .flatMap(({ name, flags }) => [
+      `**${name} Settings**:`,
+      '```json',
+      JSON.stringify(flags, null, 2),
+      '```',
+      '',
+    ]);
+
+  return sections.length
+    ? [
+        '<details>',
+        '<summary><strong>Feature Flags</strong></summary>',
+        '',
+        ...sections,
+        '</details>',
+      ]
+    : [];
+}
+
+function getIssueUrlQuery(errorLogObj?: ErrorLog): string {
+  const baseUrl = 'https://github.com/frappe/books/issues/new?labels=bug';
+
+  const body = [
+    '<h2>Description</h2>',
+    'Add some description...',
+    '',
+    '<h2>Steps to Reproduce</h2>',
+    'Add steps to reproduce the error...',
+    '',
+    '<h2>Info</h2>',
+    '',
+  ];
+
+  if (errorLogObj) {
+    body.push(`**Error**: _${errorLogObj.name}: ${errorLogObj.message}_`, '');
+  }
+
+  if (errorLogObj?.stack) {
+    body.push('**Stack**:', '```', errorLogObj.stack, '```', '');
+  }
+
+  body.push(`**Version**: \`${fyo.store.appVersion}\``);
+  body.push(`**Platform**: \`${fyo.store.platform}\``);
+  body.push(`**Path**: \`${router.currentRoute.value.fullPath}\``);
+
+  body.push(`**Language**: \`${fyo.config.get('language') ?? '-'}\``);
+  if (fyo.singles.SystemSettings?.countryCode) {
+    body.push(`**Country**: \`${fyo.singles.SystemSettings.countryCode}\``);
+  }
+  body.push('', ...getFeatureFlags());
+
+  const encodedBody = encodeURIComponent(body.join('\n'));
+  return `${baseUrl}&body=${encodedBody}`;
+}
+
+export function reportIssue(errorLogObj?: ErrorLog) {
+  const urlQuery = getIssueUrlQuery(errorLogObj);
+  ipc.openExternalUrl(urlQuery);
+}
+
+function getErrorLabel(error: Error) {
+  const name = error.name;
+  if (!name) {
+    return t`Error`;
+  }
+
+  if (name === 'BaseError') {
+    return t`Error`;
+  }
+
+  if (name === 'ValidationError') {
+    return t`Validation Error`;
+  }
+
+  if (name === 'NotFoundError') {
+    return t`Not Found`;
+  }
+
+  if (name === 'ForbiddenError') {
+    return t`Forbidden Error`;
+  }
+
+  if (name === 'DuplicateEntryError') {
+    return t`Duplicate Entry`;
+  }
+
+  if (name === 'LinkValidationError') {
+    return t`Link Validation Error`;
+  }
+
+  if (name === 'MandatoryError') {
+    return t`Mandatory Error`;
+  }
+
+  if (name === 'DatabaseError') {
+    return t`Database Error`;
+  }
+
+  if (name === 'CannotCommitError') {
+    return t`Cannot Commit Error`;
+  }
+
+  if (name === 'NotImplemented') {
+    return t`Error`;
+  }
+
+  if (name === 'ToDebugError') {
+    return t`Error`;
+  }
+
+  return t`Error`;
+}
+
+=== FILE: src\importer.ts (16.71 KB) ===
+import { Fyo } from 'fyo';
+import { Converter } from 'fyo/core/converter';
+import { DocValue, DocValueMap } from 'fyo/core/types';
+import { Doc } from 'fyo/model/doc';
+import { getEmptyValuesByFieldTypes } from 'fyo/utils';
+import { ValidationError } from 'fyo/utils/errors';
+import {
+  Field,
+  FieldType,
+  FieldTypeEnum,
+  OptionField,
+  RawValue,
+  Schema,
+  TargetField,
+} from 'schemas/types';
+import { generateCSV, parseCSV } from 'utils/csvParser';
+import { getValueMapFromList } from 'utils/index';
+
+export type TemplateField = Field & TemplateFieldProps;
+
+type TemplateFieldProps = {
+  schemaName: string;
+  schemaLabel: string;
+  fieldKey: string;
+  parentSchemaChildField?: TargetField;
+};
+
+type ValueMatrixItem =
+  | {
+      value: DocValue;
+      rawValue?: RawValue;
+      error?: boolean;
+    }
+  | { value?: DocValue; rawValue: RawValue; error?: boolean };
+
+type ValueMatrix = ValueMatrixItem[][];
+
+const skippedFieldsTypes: FieldType[] = [
+  FieldTypeEnum.AttachImage,
+  FieldTypeEnum.Attachment,
+  FieldTypeEnum.Table,
+];
+
+/**
+ * Tool that
+ * - Can make bulk entries for any kind of Doc
+ * - Takes in unstructured CSV data, converts it into Docs
+ * - Saves and or Submits the converted Docs
+ */
+export class Importer {
+  schemaName: string;
+  fyo: Fyo;
+
+  /**
+   * List of template fields that have been assigned a column, in
+   * the order they have been assigned.
+   */
+  assignedTemplateFields: (string | null)[];
+
+  /**
+   * Map of all the template fields that can be imported.
+   */
+  templateFieldsMap: Map<string, TemplateField>;
+
+  /**
+   * Map of Fields that have been picked, i.e.
+   * - Fields which will be included in the template
+   * - Fields for which values will be provided
+   */
+  templateFieldsPicked: Map<string, boolean>;
+
+  /**
+   * Whether the schema type being imported has table fields
+   */
+  hasChildTables: boolean;
+
+  /**
+   * Matrix containing the raw values which will be converted to
+   * doc values before importing.
+   */
+  valueMatrix: ValueMatrix;
+
+  /**
+   * Data from the valueMatrix rows will be converted into Docs
+   * which will be stored in this array.
+   */
+  docs: Doc[];
+
+  /**
+   * Used if an options field is imported where the import data
+   * provided maybe the label and not the value
+   */
+  optionsMap: {
+    values: Record<string, Set<string>>;
+    labelValueMap: Record<string, Record<string, string>>;
+  };
+
+  constructor(schemaName: string, fyo: Fyo) {
+    if (!fyo.schemaMap[schemaName]) {
+      throw new ValidationError(
+        `Invalid schemaName ${schemaName} found in importer`
+      );
+    }
+
+    this.hasChildTables = false;
+    this.schemaName = schemaName;
+    this.fyo = fyo;
+    this.docs = [];
+    this.valueMatrix = [];
+    this.optionsMap = {
+      values: {},
+      labelValueMap: {},
+    };
+
+    const templateFields = getTemplateFields(schemaName, fyo, this);
+    this.assignedTemplateFields = templateFields.map((f) => f.fieldKey);
+    this.templateFieldsMap = new Map();
+    this.templateFieldsPicked = new Map();
+
+    templateFields.forEach((f) => {
+      this.templateFieldsMap.set(f.fieldKey, f);
+      this.templateFieldsPicked.set(f.fieldKey, true);
+    });
+  }
+
+  selectFile(data: string): boolean {
+    try {
+      const parsed = parseCSV(data);
+      this.selectParsed(parsed);
+    } catch {
+      return false;
+    }
+
+    return true;
+  }
+
+  async checkLinks() {
+    const tfKeys = this.assignedTemplateFields
+      .map((key, index) => ({
+        key,
+        index,
+        tf: this.templateFieldsMap.get(key ?? ''),
+      }))
+      .filter(({ key, tf }) => {
+        if (!key || !tf) {
+          return false;
+        }
+
+        return tf.fieldtype === FieldTypeEnum.Link;
+      }) as { key: string; index: number; tf: TemplateField }[];
+
+    const linksNames: Map<string, Set<string>> = new Map();
+    for (const row of this.valueMatrix) {
+      for (const { tf, index } of tfKeys) {
+        const target = (tf as TargetField).target;
+        const value = row[index]?.value;
+        if (typeof value !== 'string' || !value) {
+          continue;
+        }
+
+        if (!linksNames.has(target)) {
+          linksNames.set(target, new Set());
+        }
+
+        linksNames.get(target)?.add(value);
+      }
+    }
+
+    const doesNotExist = [];
+    for (const [target, values] of linksNames.entries()) {
+      for (const value of values) {
+        const exists = await this.fyo.db.exists(target, value);
+        if (exists) {
+          continue;
+        }
+
+        doesNotExist.push({
+          schemaName: target,
+          schemaLabel: this.fyo.schemaMap[this.schemaName]?.label,
+          name: value,
+        });
+      }
+    }
+
+    return doesNotExist;
+  }
+
+  checkCellErrors() {
+    const assigned = this.assignedTemplateFields
+      .map((key, index) => ({
+        key,
+        index,
+        tf: this.templateFieldsMap.get(key ?? ''),
+      }))
+      .filter(({ key, tf }) => !!key && !!tf) as {
+      key: string;
+      index: number;
+      tf: TemplateField;
+    }[];
+
+    const cellErrors = [];
+    for (let i = 0; i < this.valueMatrix.length; i++) {
+      const row = this.valueMatrix[i];
+      for (const { tf, index } of assigned) {
+        if (!row[index]?.error) {
+          continue;
+        }
+
+        const rowLabel = this.fyo.t`Row ${i + 1}`;
+        const columnLabel = getColumnLabel(tf);
+        cellErrors.push(`(${rowLabel}, ${columnLabel})`);
+      }
+    }
+
+    return cellErrors;
+  }
+
+  populateDocs() {
+    const { dataMap, childTableMap } =
+      this.getDataAndChildTableMapFromValueMatrix();
+
+    const schema = this.fyo.schemaMap[this.schemaName];
+    const targetFieldnameMap = schema?.fields
+      .filter((f) => f.fieldtype === FieldTypeEnum.Table)
+      .reduce((acc, f) => {
+        const { target, fieldname } = f as TargetField;
+        acc[target] = fieldname;
+        return acc;
+      }, {} as Record<string, string>);
+
+    for (const [name, data] of dataMap.entries()) {
+      const doc = this.fyo.doc.getNewDoc(this.schemaName, data, false);
+      for (const schemaName in targetFieldnameMap) {
+        const fieldname = targetFieldnameMap[schemaName];
+        const childTable = childTableMap[name]?.[schemaName];
+        if (!childTable) {
+          continue;
+        }
+
+        for (const childData of childTable.values()) {
+          doc.push(fieldname, childData);
+        }
+      }
+
+      this.docs.push(doc);
+    }
+  }
+
+  getDataAndChildTableMapFromValueMatrix() {
+    /**
+     * Record key is the doc.name value
+     */
+    const dataMap: Map<string, DocValueMap> = new Map();
+
+    /**
+     * Record key is doc.name, childSchemaName, childDoc.name
+     */
+    const childTableMap: Record<
+      string,
+      Record<string, Map<string, DocValueMap>>
+    > = {};
+
+    const nameIndices = this.assignedTemplateFields
+      .map((key, index) => ({ key, index }))
+      .filter((f) => f.key?.endsWith('.name'))
+      .reduce((acc, f) => {
+        if (f.key == null) {
+          return acc;
+        }
+
+        const schemaName = f.key.split('.')[0];
+        acc[schemaName] = f.index;
+        return acc;
+      }, {} as Record<string, number>);
+
+    const nameIndex = nameIndices?.[this.schemaName];
+    if (nameIndex < 0) {
+      return { dataMap, childTableMap };
+    }
+
+    for (let i = 0; i < this.valueMatrix.length; i++) {
+      const row = this.valueMatrix[i];
+      const name = row[nameIndex]?.value;
+      if (typeof name !== 'string') {
+        continue;
+      }
+
+      for (let j = 0; j < row.length; j++) {
+        const key = this.assignedTemplateFields[j];
+        const tf = this.templateFieldsMap.get(key ?? '');
+        if (!tf || !key) {
+          continue;
+        }
+
+        const isChild = this.fyo.schemaMap[tf.schemaName]?.isChild;
+        const vmi = row[j];
+        if (vmi.value == null) {
+          continue;
+        }
+
+        if (!isChild && !dataMap.has(name)) {
+          dataMap.set(name, {});
+        }
+
+        if (!isChild) {
+          dataMap.get(name)![tf.fieldname] = vmi.value;
+          continue;
+        }
+
+        const childNameIndex = nameIndices[tf.schemaName];
+        let childName = row[childNameIndex]?.value;
+        if (typeof childName !== 'string') {
+          childName = `${tf.schemaName}-${i}`;
+        }
+
+        childTableMap[name] ??= {};
+        childTableMap[name][tf.schemaName] ??= new Map();
+
+        const childMap = childTableMap[name][tf.schemaName];
+        if (!childMap.has(childName)) {
+          childMap.set(childName, {});
+        }
+
+        const childDocValueMap = childMap.get(childName);
+        if (!childDocValueMap) {
+          continue;
+        }
+
+        childDocValueMap[tf.fieldname] = vmi.value;
+      }
+    }
+
+    return { dataMap, childTableMap };
+  }
+
+  selectParsed(parsed: string[][]): void {
+    if (!parsed?.length) {
+      return;
+    }
+
+    let startIndex = -1;
+    let templateFieldsAssigned;
+
+    for (let i = 3; i >= 0; i--) {
+      const row = parsed[i];
+      if (!row?.length) {
+        continue;
+      }
+
+      templateFieldsAssigned = this.assignTemplateFieldsFromParsedRow(row);
+      if (templateFieldsAssigned) {
+        startIndex = i + 1;
+        break;
+      }
+    }
+
+    if (!templateFieldsAssigned) {
+      this.clearAndResizeAssignedTemplateFields(parsed[0].length);
+    }
+
+    if (startIndex === -1) {
+      startIndex = 0;
+    }
+
+    this.assignValueMatrixFromParsed(parsed.slice(startIndex));
+  }
+
+  clearAndResizeAssignedTemplateFields(size: number) {
+    for (let i = 0; i < size; i++) {
+      if (i >= this.assignedTemplateFields.length) {
+        this.assignedTemplateFields.push(null);
+      } else {
+        this.assignedTemplateFields[i] = null;
+      }
+    }
+  }
+
+  assignValueMatrixFromParsed(parsed: string[][]) {
+    if (!parsed?.length) {
+      return;
+    }
+
+    for (const row of parsed) {
+      this.pushToValueMatrixFromParsedRow(row);
+    }
+  }
+
+  pushToValueMatrixFromParsedRow(row: string[]) {
+    const vmRow: ValueMatrix[number] = [];
+    for (let i = 0; i < row.length; i++) {
+      const rawValue = row[i];
+      const index = Number(i);
+
+      if (index >= this.assignedTemplateFields.length) {
+        this.assignedTemplateFields.push(null);
+      }
+
+      vmRow.push(this.getValueMatrixItem(index, rawValue));
+    }
+
+    this.valueMatrix.push(vmRow);
+  }
+
+  setTemplateField(index: number, key: string | null) {
+    if (index >= this.assignedTemplateFields.length) {
+      this.assignedTemplateFields.push(key);
+    } else {
+      this.assignedTemplateFields[index] = key;
+    }
+
+    this.updateValueMatrixColumn(index);
+  }
+
+  updateValueMatrixColumn(index: number) {
+    for (const row of this.valueMatrix) {
+      const vmi = this.getValueMatrixItem(index, row[index].rawValue ?? null);
+
+      if (index >= row.length) {
+        row.push(vmi);
+      } else {
+        row[index] = vmi;
+      }
+    }
+  }
+
+  getValueMatrixItem(index: number, rawValue: RawValue) {
+    const vmi: ValueMatrixItem = { rawValue };
+    const key = this.assignedTemplateFields[index];
+    if (!key) {
+      return vmi;
+    }
+
+    const tf = this.templateFieldsMap.get(key);
+    if (!tf) {
+      return vmi;
+    }
+
+    if (vmi.rawValue === '') {
+      vmi.value = null;
+      return vmi;
+    }
+
+    if ('options' in tf && typeof vmi.rawValue === 'string') {
+      return this.getOptionFieldVmi(vmi, tf);
+    }
+
+    try {
+      vmi.value = Converter.toDocValue(rawValue, tf, this.fyo);
+    } catch {
+      vmi.error = true;
+    }
+
+    return vmi;
+  }
+
+  getOptionFieldVmi(
+    { rawValue }: ValueMatrixItem,
+    tf: OptionField & TemplateFieldProps
+  ): ValueMatrixItem {
+    if (typeof rawValue !== 'string') {
+      return { error: true, value: null, rawValue };
+    }
+
+    if (!tf?.options.length) {
+      return { value: null, rawValue };
+    }
+
+    if (!this.optionsMap.labelValueMap[tf.fieldKey]) {
+      const values = new Set(tf.options.map(({ value }) => value));
+      const labelValueMap = getValueMapFromList(tf.options, 'label', 'value');
+
+      this.optionsMap.labelValueMap[tf.fieldKey] = labelValueMap;
+      this.optionsMap.values[tf.fieldKey] = values;
+    }
+
+    const hasValue = this.optionsMap.values[tf.fieldKey].has(rawValue);
+    if (hasValue) {
+      return { value: rawValue, rawValue };
+    }
+
+    const value = this.optionsMap.labelValueMap[tf.fieldKey][rawValue];
+    if (value) {
+      return { value, rawValue };
+    }
+
+    return { error: true, value: null, rawValue };
+  }
+
+  assignTemplateFieldsFromParsedRow(row: string[]): boolean {
+    const isKeyRow = row.some((key) => this.templateFieldsMap.has(key));
+    if (!isKeyRow) {
+      return false;
+    }
+
+    for (let i = 0; i < row.length; i++) {
+      const value = row[i];
+      const tf = this.templateFieldsMap.get(value);
+      let key: string | null = value;
+
+      if (!tf) {
+        key = null;
+      }
+
+      if (key !== null && !this.templateFieldsPicked.get(value)) {
+        key = null;
+      }
+
+      if (Number(i) >= this.assignedTemplateFields.length) {
+        this.assignedTemplateFields.push(key);
+      } else {
+        this.assignedTemplateFields[i] = key;
+      }
+    }
+
+    return true;
+  }
+
+  addRow() {
+    const valueRow: ValueMatrix[number] = this.assignedTemplateFields.map(
+      (key) => {
+        key ??= '';
+        const { fieldtype } = this.templateFieldsMap.get(key) ?? {};
+        let value = null;
+        if (fieldtype) {
+          value = getEmptyValuesByFieldTypes(fieldtype, this.fyo);
+        }
+
+        return { value };
+      }
+    );
+
+    this.valueMatrix.push(valueRow);
+  }
+
+  removeRow(index: number) {
+    this.valueMatrix = this.valueMatrix.filter((_, i) => i !== index);
+  }
+
+  getCSVTemplate(): string {
+    const schemaLabels: string[] = [];
+    const fieldLabels: string[] = [];
+    const fieldKey: string[] = [];
+
+    for (const [name, picked] of this.templateFieldsPicked.entries()) {
+      if (!picked) {
+        continue;
+      }
+
+      const field = this.templateFieldsMap.get(name);
+      if (!field) {
+        continue;
+      }
+
+      schemaLabels.push(field.schemaLabel);
+      fieldLabels.push(field.label);
+      fieldKey.push(field.fieldKey);
+    }
+
+    return generateCSV([schemaLabels, fieldLabels, fieldKey]);
+  }
+}
+
+function getTemplateFields(
+  schemaName: string,
+  fyo: Fyo,
+  importer: Importer
+): TemplateField[] {
+  const schemas: { schema: Schema; parentSchemaChildField?: TargetField }[] = [
+    { schema: fyo.schemaMap[schemaName]! },
+  ];
+  const fields: TemplateField[] = [];
+
+  const targetSchemaFieldMap =
+    fyo.schemaMap[importer.schemaName]?.fields.reduce((acc, f) => {
+      if (!(f as TargetField).target) {
+        return acc;
+      }
+
+      acc[f.fieldname] = f;
+      return acc;
+    }, {} as Record<string, Field>) ?? {};
+
+  while (schemas.length) {
+    const { schema, parentSchemaChildField } = schemas.pop() ?? {};
+    if (!schema) {
+      continue;
+    }
+
+    for (const field of schema.fields) {
+      if (shouldSkipField(field, schema)) {
+        continue;
+      }
+
+      if (field.fieldtype === FieldTypeEnum.Table) {
+        importer.hasChildTables = true;
+        schemas.push({
+          schema: fyo.schemaMap[field.target]!,
+          parentSchemaChildField: field,
+        });
+      }
+
+      if (skippedFieldsTypes.includes(field.fieldtype)) {
+        continue;
+      }
+
+      const tf = { ...field };
+
+      if (tf.readOnly) {
+        tf.readOnly = false;
+      }
+
+      if (schema.isChild && tf.fieldname === 'name') {
+        tf.required = false;
+      }
+
+      if (
+        schema.isChild &&
+        tf.required &&
+        !targetSchemaFieldMap[tf.schemaName ?? '']?.required
+      ) {
+        tf.required = false;
+      }
+
+      const schemaName = schema.name;
+      const schemaLabel = schema.label;
+      const fieldKey = `${schema.name}.${field.fieldname}`;
+
+      fields.push({
+        ...tf,
+        schemaName,
+        schemaLabel,
+        fieldKey,
+        parentSchemaChildField,
+      });
+    }
+  }
+
+  return fields;
+}
+
+export function getColumnLabel(field: TemplateField): string {
+  if (field.parentSchemaChildField) {
+    return `${field.label} (${field.parentSchemaChildField.label})`;
+  }
+
+  return field.label;
+}
+
+function shouldSkipField(field: Field, schema: Schema): boolean {
+  if (field.computed || field.meta) {
+    return true;
+  }
+
+  if (schema.naming === 'numberSeries' && field.fieldname === 'name') {
+    return false;
+  }
+
+  if (field.hidden) {
+    return true;
+  }
+
+  if (field.readOnly && !field.required) {
+    return true;
+  }
+
+  return false;
+}
+
+=== FILE: src\index.html (0.33 KB) ===
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <title>KarobarPro</title>
+  </head>
+  <body></body>
+  <script type="module" src="./renderer.ts"></script>
+</html>
+
+=== FILE: src\initFyo.ts (0.24 KB) ===
+import { Fyo } from 'fyo';
+
+/**
+ * Global fyo: this is meant to be used only by the app. For
+ * testing purposes a separate instance of fyo should be initialized.
+ */
+
+export const fyo = new Fyo({ isTest: false, isElectron: true });
+
+=== FILE: src\README.md (0.68 KB) ===
+# src
+
+This is where all the frontend code lives
+
+## Fyo Initialization
+
+The initialization flows are different when the instance is new or is existing.
+All of them are triggered from `src/App.vue`.
+
+**New Instance**
+
+1. Run _Setup Wizard_ for init values (eg: `country`).
+2. Call `setupInstance.ts/setupInstance` using init values.
+
+**Existing Instance**
+
+1. Connect to db.
+2. Check if _Setup Wizard_ has been completed, if not, jump to **New Instance**
+3. Call `initFyo/initializeInstance` with `dbPath` and `countryCode`
+
+## Global Fyo
+
+Global fyo is exported from `initFyo.ts`. Only code that isn't going to be unit
+tested using `mocha` should use this, i.e. code in `src`
+
+=== FILE: src\renderer.ts (3.62 KB) ===
+import { CUSTOM_EVENTS } from 'utils/messages';
+import { UnexpectedLogObject } from 'utils/types';
+import { App as VueApp, createApp } from 'vue';
+import App from './App.vue';
+import Badge from './components/Badge.vue';
+import FeatherIcon from './components/FeatherIcon.vue';
+import { handleError, sendError } from './errorHandling';
+import { fyo } from './initFyo';
+import { outsideClickDirective } from './renderer/helpers';
+import registerIpcRendererListeners from './renderer/registerIpcRendererListeners';
+import router from './router';
+import { stringifyCircular } from './utils';
+import { setLanguageMap } from './utils/language';
+
+// eslint-disable-next-line @typescript-eslint/no-floating-promises
+(async () => {
+  const language = fyo.config.get('language') as string;
+  if (language) {
+    await setLanguageMap(language);
+  }
+  fyo.store.language = language || 'English';
+
+  registerIpcRendererListeners();
+  const { isDevelopment, platform, version } = await ipc.getEnv();
+
+  fyo.store.isDevelopment = isDevelopment;
+  fyo.store.appVersion = version;
+  fyo.store.platform = platform;
+  const platformName = getPlatformName(platform);
+
+  setOnWindow(isDevelopment);
+
+  const app = createApp({
+    template: '<App/>',
+  });
+  app.config.unwrapInjectedRef = true;
+  setErrorHandlers(app);
+
+  app.use(router);
+  app.component('App', App);
+  app.component('FeatherIcon', FeatherIcon);
+  app.component('Badge', Badge);
+  app.directive('on-outside-click', outsideClickDirective);
+  app.mixin({
+    computed: {
+      fyo() {
+        return fyo;
+      },
+      platform() {
+        return platformName;
+      },
+    },
+    methods: {
+      t: fyo.t,
+      T: fyo.T,
+    },
+  });
+
+  await fyo.telemetry.logOpened();
+  app.mount('body');
+})();
+
+function setErrorHandlers(app: VueApp) {
+  window.onerror = (message, source, lineno, colno, error) => {
+    error = error ?? new Error('triggered in window.onerror');
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    handleError(true, error, { message, source, lineno, colno });
+  };
+
+  window.onunhandledrejection = (event: PromiseRejectionEvent) => {
+    let error: Error;
+    if (event.reason instanceof Error) {
+      error = event.reason;
+    } else {
+      error = new Error(String(event.reason));
+    }
+
+    // eslint-disable-next-line no-console
+    handleError(true, error).catch((err) => console.error(err));
+  };
+
+  window.addEventListener(CUSTOM_EVENTS.LOG_UNEXPECTED, (event) => {
+    const details = (event as CustomEvent)?.detail as UnexpectedLogObject;
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    sendError(details);
+  });
+
+  app.config.errorHandler = (err, vm, info) => {
+    const more: Record<string, unknown> = {
+      info,
+    };
+
+    if (vm) {
+      const { fullPath, params } = vm.$route;
+      more.fullPath = fullPath;
+      more.params = stringifyCircular(params ?? {});
+      more.props = stringifyCircular(vm.$props ?? {}, true, true);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-floating-promises
+    handleError(false, err as Error, more);
+    // eslint-disable-next-line no-console
+    console.error(err, vm, info);
+  };
+}
+
+function setOnWindow(isDevelopment: boolean) {
+  if (!isDevelopment) {
+    return;
+  }
+
+  // @ts-ignore
+  window.router = router;
+  // @ts-ignore
+  window.fyo = fyo;
+}
+
+function getPlatformName(platform: string) {
+  switch (platform) {
+    case 'win32':
+      return 'Windows';
+    case 'darwin':
+      return 'Mac';
+    case 'linux':
+      return 'Linux';
+    default:
+      return 'Linux';
+  }
+}
+
+=== FILE: src\router.ts (3.95 KB) ===
+import ChartOfAccounts from 'src/pages/ChartOfAccounts.vue';
+import CommonForm from 'src/pages/CommonForm/CommonForm.vue';
+import Dashboard from 'src/pages/Dashboard/Dashboard.vue';
+import GetStarted from 'src/pages/GetStarted.vue';
+import ImportWizard from 'src/pages/ImportWizard.vue';
+import ListView from 'src/pages/ListView/ListView.vue';
+import PrintView from 'src/pages/PrintView/PrintView.vue';
+import ReportPrintView from 'src/pages/PrintView/ReportPrintView.vue';
+import QuickEditForm from 'src/pages/QuickEditForm.vue';
+import Report from 'src/pages/Report.vue';
+import Settings from 'src/pages/Settings/Settings.vue';
+import TemplateBuilder from 'src/pages/TemplateBuilder/TemplateBuilder.vue';
+import CustomizeForm from 'src/pages/CustomizeForm/CustomizeForm.vue';
+import POS from 'src/pages/POS/POS.vue';
+import Khata from 'src/pages/Khata/Khata.vue';
+import type { HistoryState } from 'vue-router';
+import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router';
+import { historyState } from './utils/refs';
+
+const routes: RouteRecordRaw[] = [
+  {
+    path: '/',
+    component: Dashboard,
+  },
+  {
+    path: '/khata',
+    name: 'Khata',
+    component: Khata,
+  },
+  {
+    path: '/get-started',
+    component: GetStarted,
+  },
+  {
+    path: `/edit/:schemaName/:name`,
+    name: `CommonForm`,
+    components: {
+      default: CommonForm,
+      edit: QuickEditForm,
+    },
+    props: {
+      default: (route) => ({
+        schemaName: route.params.schemaName,
+        name: route.params.name,
+      }),
+      edit: (route) => route.query,
+    },
+  },
+  {
+    path: '/list/:schemaName/:pageTitle?',
+    name: 'ListView',
+    components: {
+      default: ListView,
+      edit: QuickEditForm,
+    },
+    props: {
+      default: (route) => {
+        const { schemaName } = route.params;
+        const pageTitle = route.params.pageTitle ?? '';
+
+        const filters = {};
+        const filterString = route.query.filters;
+        if (typeof filterString === 'string') {
+          Object.assign(filters, JSON.parse(filterString));
+        }
+
+        return {
+          schemaName,
+          filters,
+          pageTitle,
+        };
+      },
+      edit: (route) => route.query,
+    },
+  },
+  {
+    path: '/print/:schemaName/:name',
+    name: 'PrintView',
+    component: PrintView,
+    props: true,
+  },
+  {
+    path: '/report-print/:reportName',
+    name: 'ReportPrintView',
+    component: ReportPrintView,
+    props: true,
+  },
+  {
+    path: '/report/:reportClassName',
+    name: 'Report',
+    component: Report,
+    props: true,
+  },
+  {
+    path: '/chart-of-accounts',
+    name: 'Chart Of Accounts',
+    components: {
+      default: ChartOfAccounts,
+      edit: QuickEditForm,
+    },
+    props: {
+      default: true,
+      edit: (route) => route.query,
+    },
+  },
+  {
+    path: '/import-wizard',
+    name: 'Import Wizard',
+    component: ImportWizard,
+  },
+  {
+    path: '/template-builder/:name',
+    name: 'Template Builder',
+    component: TemplateBuilder,
+    props: true,
+  },
+  {
+    path: '/customize-form',
+    name: 'Customize Form',
+    component: CustomizeForm,
+  },
+  {
+    path: '/settings',
+    name: 'Settings',
+    components: {
+      default: Settings,
+      edit: QuickEditForm,
+    },
+    props: {
+      default: true,
+      edit: (route) => route.query,
+    },
+  },
+  {
+    path: '/pos',
+    name: 'Point of Sale',
+    components: {
+      default: POS,
+      edit: QuickEditForm,
+    },
+    props: {
+      default: true,
+      edit: (route) => route.query,
+    },
+  },
+];
+
+const router = createRouter({ routes, history: createWebHistory() });
+
+router.afterEach(({ fullPath }) => {
+  const state = history.state as HistoryState;
+  historyState.forward = !!state.forward;
+  historyState.back = !!state.back;
+
+  if (fullPath.includes('index.html')) {
+    return;
+  }
+
+  localStorage.setItem('lastRoute', fullPath);
+});
+
+export default router;
+
+=== FILE: src\shims-tsx.d.ts (0.38 KB) ===
+import type { IPC } from 'main/preload';
+import Vue, { VNode } from 'vue';
+
+declare global {
+  const ipc: IPC;
+  namespace JSX {
+    type Element = VNode;
+    type ElementClass = Vue;
+    interface IntrinsicElements {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      [elem: string]: any;
+    }
+  }
+
+  interface Window {
+    ipc: IPC;
+  }
+}
+
+=== FILE: src\shims-vue-custom.d.ts (0.27 KB) ===
+import { Fyo } from 'fyo';
+import { TranslationLiteral } from 'fyo/utils/translation';
+
+declare module 'vue' {
+  interface ComponentCustomProperties {
+    t: (...args: TranslationLiteral[]) => string;
+    fyo: Fyo;
+    platform: 'Windows' | 'Linux' | 'Mac';
+  }
+}
+
+=== FILE: src\shims-vue.d.ts (0.25 KB) ===
+declare module '*.vue' {
+  import type { DefineComponent } from 'vue';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/ban-types
+  const component: DefineComponent<{}, {}, any>;
+  export default component;
+}
+
+=== SRC SUBFOLDERS ===
+--- FOLDER: src\setup ---
+=== FILE: src\setup\createCOA.ts (2.82 KB) ===
+import { Fyo } from 'fyo';
+import {
+  AccountRootType,
+  COAChildAccount,
+  COARootAccount,
+  COATree,
+} from 'models/baseModels/Account/types';
+import { getCOAList } from 'models/baseModels/SetupWizard/SetupWizard';
+import { getStandardCOA } from './standardCOA';
+
+const accountFields = ['accountType', 'accountNumber', 'rootType', 'isGroup'];
+
+export class CreateCOA {
+  fyo: Fyo;
+  chartOfAccounts: string;
+
+  constructor(chartOfAccounts: string, fyo: Fyo) {
+    this.chartOfAccounts = chartOfAccounts;
+    this.fyo = fyo;
+  }
+
+  async run() {
+    const chart = await getCOA(this.chartOfAccounts);
+    await this.createCOAAccounts(chart, null, '', true);
+  }
+
+  async createCOAAccounts(
+    children: COATree | COARootAccount | COAChildAccount,
+    parentAccount: string | null,
+    rootType: AccountRootType | '',
+    rootAccount: boolean
+  ) {
+    for (const rootName in children) {
+      if (accountFields.includes(rootName)) {
+        continue;
+      }
+
+      const child = children[rootName];
+
+      if (rootAccount) {
+        rootType = (child as COARootAccount).rootType;
+      }
+
+      const accountType = (child as COAChildAccount).accountType ?? '';
+      const accountNumber = (child as COAChildAccount).accountNumber;
+      const accountName = getAccountName(rootName, accountNumber);
+
+      const isGroup = identifyIsGroup(
+        child as COAChildAccount | COARootAccount
+      );
+
+      const doc = this.fyo.doc.getNewDoc('Account', {
+        name: accountName,
+        parentAccount,
+        isGroup,
+        rootType,
+        accountType,
+      });
+
+      await doc.sync();
+      await this.createCOAAccounts(
+        child as COAChildAccount,
+        accountName,
+        rootType,
+        false
+      );
+    }
+  }
+}
+
+function identifyIsGroup(child: COARootAccount | COAChildAccount): boolean {
+  if (child.isGroup !== undefined) {
+    return child.isGroup as boolean;
+  }
+
+  const keys = Object.keys(child);
+  const children = keys.filter((key) => !accountFields.includes(key));
+
+  if (children.length) {
+    return true;
+  }
+
+  return false;
+}
+
+async function getCOA(chartOfAccounts: string): Promise<COATree> {
+  const coaList = getCOAList();
+  const coa = coaList.find(({ name }) => name === chartOfAccounts);
+
+  const conCode = coa?.countryCode;
+  if (!conCode) {
+    return getStandardCOA();
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const countryCoa = (await import(`../../fixtures/verified/${conCode}.json`))
+      .default as { tree: COATree };
+    return countryCoa.tree;
+  } catch (e) {
+    return getStandardCOA();
+  }
+}
+
+function getAccountName(accountName: string, accountNumber?: string) {
+  if (accountNumber) {
+    return `${accountName} - ${accountNumber}`;
+  }
+
+  return accountName;
+}
+
+=== FILE: src\setup\setupInstance.ts (10.61 KB) ===
+import { Fyo } from 'fyo';
+import { DocValueMap } from 'fyo/core/types';
+import { Doc } from 'fyo/model/doc';
+import { createNumberSeries } from 'fyo/model/naming';
+import {
+  DEFAULT_CURRENCY,
+  DEFAULT_LOCALE,
+  DEFAULT_SERIES_START,
+} from 'fyo/utils/consts';
+import {
+  AccountRootTypeEnum,
+  AccountTypeEnum,
+} from 'models/baseModels/Account/types';
+import { AccountingSettings } from 'models/baseModels/AccountingSettings/AccountingSettings';
+import { numberSeriesDefaultsMap } from 'models/baseModels/Defaults/Defaults';
+import { InventorySettings } from 'models/inventory/InventorySettings';
+import { ValuationMethod } from 'models/inventory/types';
+import { ModelNameEnum } from 'models/types';
+import { createRegionalRecords } from 'src/regional';
+import {
+  initializeInstance,
+  setCurrencySymbols,
+} from 'src/utils/initialization';
+import { getRandomString } from 'utils';
+import { getDefaultLocations, getDefaultUOMs } from 'utils/defaults';
+import { getCountryCodeFromCountry, getCountryInfo } from 'utils/misc';
+import { CountryInfo } from 'utils/types';
+import { CreateCOA } from './createCOA';
+import { SetupWizardOptions } from './types';
+
+export default async function setupInstance(
+  dbPath: string,
+  setupWizardOptions: SetupWizardOptions,
+  fyo: Fyo
+) {
+  const { companyName, country, bankName, chartOfAccounts } =
+    setupWizardOptions;
+
+  fyo.store.skipTelemetryLogging = true;
+  await initializeDatabase(dbPath, country, fyo);
+  await updateSystemSettings(setupWizardOptions, fyo);
+  await updateAccountingSettings(setupWizardOptions, fyo);
+  await updatePrintSettings(setupWizardOptions, fyo);
+
+  await createCurrencyRecords(fyo);
+  await createAccountRecords(bankName, country, chartOfAccounts, fyo);
+  await createRegionalRecords(country, fyo);
+  await createDefaultEntries(fyo);
+  await createDefaultNumberSeries(fyo);
+  await updateInventorySettings(fyo);
+
+  if (fyo.isElectron) {
+    const { updatePrintTemplates } = await import('src/utils/printTemplates');
+    await updatePrintTemplates(fyo);
+  }
+
+  await completeSetup(companyName, fyo);
+  if (!Object.keys(fyo.currencySymbols).length) {
+    await setCurrencySymbols(fyo);
+  }
+
+  fyo.store.skipTelemetryLogging = false;
+}
+
+async function createDefaultEntries(fyo: Fyo) {
+  /**
+   * Create default UOM entries
+   */
+  for (const uom of getDefaultUOMs(fyo)) {
+    await checkAndCreateDoc(ModelNameEnum.UOM, uom, fyo);
+  }
+
+  for (const loc of getDefaultLocations(fyo)) {
+    await checkAndCreateDoc(ModelNameEnum.Location, loc, fyo);
+  }
+}
+
+async function initializeDatabase(dbPath: string, country: string, fyo: Fyo) {
+  const countryCode = getCountryCodeFromCountry(country);
+  await initializeInstance(dbPath, true, countryCode, fyo);
+}
+
+async function updateAccountingSettings(
+  {
+    companyName,
+    country,
+    fullname,
+    email,
+    bankName,
+    fiscalYearStart,
+    fiscalYearEnd,
+  }: SetupWizardOptions,
+  fyo: Fyo
+) {
+  const accountingSettings = (await fyo.doc.getDoc(
+    'AccountingSettings'
+  )) as AccountingSettings;
+  await accountingSettings.setAndSync({
+    companyName,
+    country,
+    fullname,
+    email,
+    bankName,
+    fiscalYearStart,
+    fiscalYearEnd,
+  });
+  return accountingSettings;
+}
+
+async function updatePrintSettings(
+  { logo, companyName, email }: SetupWizardOptions,
+  fyo: Fyo
+) {
+  const printSettings = await fyo.doc.getDoc('PrintSettings');
+  await printSettings.setAndSync({
+    logo,
+    companyName,
+    email,
+    displayLogo: logo ? true : false,
+  });
+}
+
+async function updateSystemSettings(
+  { country, currency: companyCurrency }: SetupWizardOptions,
+  fyo: Fyo
+) {
+  const countryInfo = getCountryInfo();
+  const countryOptions = countryInfo[country] as CountryInfo;
+  const currency =
+    companyCurrency ?? countryOptions.currency ?? DEFAULT_CURRENCY;
+  const locale = countryOptions.locale ?? DEFAULT_LOCALE;
+  const countryCode = getCountryCodeFromCountry(country);
+  const systemSettings = await fyo.doc.getDoc('SystemSettings');
+  const instanceId = getRandomString();
+
+  await systemSettings.setAndSync({
+    locale,
+    currency,
+    instanceId,
+    countryCode,
+  });
+}
+
+async function createCurrencyRecords(fyo: Fyo) {
+  const promises: Promise<Doc | undefined>[] = [];
+  const queue: string[] = [];
+  const countrySettings = Object.values(getCountryInfo()) as CountryInfo[];
+
+  for (const country of countrySettings) {
+    const {
+      currency,
+      currency_fraction,
+      currency_fraction_units,
+      smallest_currency_fraction_value,
+      currency_symbol,
+    } = country;
+
+    if (!currency || queue.includes(currency)) {
+      continue;
+    }
+
+    const docObject = {
+      name: currency,
+      fraction: currency_fraction ?? '',
+      fractionUnits: currency_fraction_units ?? 100,
+      smallestValue: smallest_currency_fraction_value ?? 0.01,
+      symbol: currency_symbol ?? '',
+    };
+
+    const doc = checkAndCreateDoc('Currency', docObject, fyo);
+    promises.push(doc);
+    queue.push(currency);
+  }
+  return Promise.all(promises);
+}
+
+async function createAccountRecords(
+  bankName: string,
+  country: string,
+  chartOfAccounts: string,
+  fyo: Fyo
+) {
+  const createCOA = new CreateCOA(chartOfAccounts, fyo);
+  await createCOA.run();
+  const parentAccount = await getBankAccountParentName(country, fyo);
+  const bankAccountDoc = {
+    name: bankName,
+    rootType: AccountRootTypeEnum.Asset,
+    parentAccount,
+    accountType: 'Bank',
+    isGroup: false,
+  };
+
+  await checkAndCreateDoc('Account', bankAccountDoc, fyo);
+  await createDiscountAccount(fyo);
+  await setDefaultAccounts(fyo);
+}
+
+export async function createDiscountAccount(fyo: Fyo) {
+  const incomeAccountName = fyo.t`Indirect Income`;
+  const accountExists = await fyo.db.exists(
+    ModelNameEnum.Account,
+    incomeAccountName
+  );
+
+  if (!accountExists) {
+    return;
+  }
+
+  const discountAccountName = fyo.t`Discounts`;
+  const discountAccountDoc = {
+    name: discountAccountName,
+    rootType: AccountRootTypeEnum.Income,
+    parentAccount: incomeAccountName,
+    accountType: 'Income Account',
+    isGroup: false,
+  };
+
+  await checkAndCreateDoc(ModelNameEnum.Account, discountAccountDoc, fyo);
+  await fyo.singles.AccountingSettings!.setAndSync(
+    'discountAccount',
+    discountAccountName
+  );
+}
+
+async function setDefaultAccounts(fyo: Fyo) {
+  await setDefaultAccount('writeOffAccount', fyo.t`Write Off`, fyo);
+  const isSet = await setDefaultAccount(
+    'roundOffAccount',
+    fyo.t`Rounded Off`,
+    fyo
+  );
+
+  if (!isSet) {
+    await setDefaultAccount('roundOffAccount', fyo.t`Round Off`, fyo);
+  }
+}
+
+async function setDefaultAccount(key: string, accountName: string, fyo: Fyo) {
+  const accountExists = await fyo.db.exists(ModelNameEnum.Account, accountName);
+  if (!accountExists) {
+    return false;
+  }
+
+  await fyo.singles.AccountingSettings!.setAndSync(key, accountName);
+  return true;
+}
+
+async function completeSetup(companyName: string, fyo: Fyo) {
+  await fyo.singles.AccountingSettings!.setAndSync('setupComplete', true);
+}
+
+async function checkAndCreateDoc(
+  schemaName: string,
+  docObject: DocValueMap,
+  fyo: Fyo
+): Promise<Doc | undefined> {
+  const canCreate = await checkIfExactRecordAbsent(schemaName, docObject, fyo);
+  if (!canCreate) {
+    return;
+  }
+
+  const doc = fyo.doc.getNewDoc(schemaName, docObject);
+  return doc.sync();
+}
+
+async function checkIfExactRecordAbsent(
+  schemaName: string,
+  docMap: DocValueMap,
+  fyo: Fyo
+) {
+  const name = docMap.name as string;
+  const newDocObject = Object.assign({}, docMap);
+
+  const rows = await fyo.db.getAllRaw(schemaName, {
+    fields: ['*'],
+    filters: { name },
+  });
+
+  if (rows.length === 0) {
+    return true;
+  }
+
+  const storedDocObject = rows[0];
+  const matchList = Object.keys(newDocObject).map((key) => {
+    const newValue = newDocObject[key];
+    const storedValue = storedDocObject[key];
+    return newValue == storedValue; // Should not be type sensitive.
+  });
+
+  if (!matchList.every(Boolean)) {
+    await fyo.db.delete(schemaName, name);
+    return true;
+  }
+
+  return false;
+}
+
+async function getBankAccountParentName(country: string, fyo: Fyo) {
+  const parentBankAccount = await fyo.db.getAllRaw('Account', {
+    fields: ['*'],
+    filters: { isGroup: true, accountType: 'Bank' },
+  });
+
+  if (parentBankAccount.length === 0) {
+    // This should not happen if the fixtures are correct.
+    return 'Bank Accounts';
+  } else if (parentBankAccount.length > 1) {
+    switch (country) {
+      case 'Indonesia':
+        return 'Bank Rupiah - 1121.000';
+      default:
+        break;
+    }
+  }
+
+  return parentBankAccount[0].name;
+}
+
+async function createDefaultNumberSeries(fyo: Fyo) {
+  const numberSeriesFields = Object.values(fyo.schemaMap)
+    .map((f) => f?.fields)
+    .flat()
+    .filter((f) => f?.fieldname === 'numberSeries');
+
+  for (const field of numberSeriesFields) {
+    const defaultValue = field?.default as string | undefined;
+    const schemaName = field?.schemaName;
+    if (!defaultValue || !schemaName) {
+      continue;
+    }
+
+    await createNumberSeries(
+      defaultValue,
+      schemaName,
+      DEFAULT_SERIES_START,
+      fyo
+    );
+
+    const defaultKey = numberSeriesDefaultsMap[schemaName];
+    if (!defaultKey || fyo.singles.Defaults?.[defaultKey]) {
+      continue;
+    }
+
+    await fyo.singles.Defaults?.setAndSync(defaultKey as string, defaultValue);
+  }
+}
+
+async function updateInventorySettings(fyo: Fyo) {
+  const inventorySettings = (await fyo.doc.getDoc(
+    ModelNameEnum.InventorySettings
+  )) as InventorySettings;
+
+  if (!inventorySettings.valuationMethod) {
+    await inventorySettings.set('valuationMethod', ValuationMethod.FIFO);
+  }
+  const accountTypeDefaultMap = {
+    [AccountTypeEnum.Stock]: 'stockInHand',
+    [AccountTypeEnum['Stock Received But Not Billed']]:
+      'stockReceivedButNotBilled',
+    [AccountTypeEnum['Cost of Goods Sold']]: 'costOfGoodsSold',
+  } as Record<string, string>;
+
+  for (const accountType in accountTypeDefaultMap) {
+    const accounts = (await fyo.db.getAllRaw('Account', {
+      filters: { accountType, isGroup: false },
+    })) as { name: string }[];
+
+    if (!accounts.length) {
+      continue;
+    }
+
+    const settingName = accountTypeDefaultMap[accountType]!;
+    await inventorySettings.set(settingName, accounts[0].name);
+  }
+
+  const location = fyo.t`Stores`;
+  if (await fyo.db.exists(ModelNameEnum.Location, location)) {
+    await inventorySettings.set('defaultLocation', location);
+  }
+
+  await inventorySettings.sync();
+}
+
+=== FILE: src\setup\standardCOA.ts (4.69 KB) ===
+import { t } from 'fyo';
+import { COATree } from 'models/baseModels/Account/types';
+
+export function getStandardCOA(): COATree {
+  return {
+    [t`Application of Funds (Assets)`]: {
+      [t`Current Assets`]: {
+        [t`Accounts Receivable`]: {
+          [t`Debtors`]: {
+            accountType: 'Receivable',
+          },
+        },
+        [t`Bank Accounts`]: {
+          accountType: 'Bank',
+          isGroup: true,
+        },
+        [t`Cash In Hand`]: {
+          [t`Cash`]: {
+            accountType: 'Cash',
+          },
+          accountType: 'Cash',
+        },
+        [t`Loans and Advances (Assets)`]: {
+          isGroup: true,
+        },
+        [t`Securities and Deposits`]: {
+          [t`Earnest Money`]: {},
+        },
+        [t`Stock Assets`]: {
+          [t`Stock In Hand`]: {
+            accountType: 'Stock',
+          },
+          accountType: 'Stock',
+        },
+        [t`Tax Assets`]: {
+          isGroup: true,
+        },
+      },
+      [t`Fixed Assets`]: {
+        [t`Capital Equipments`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Electronic Equipments`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Furnitures and Fixtures`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Office Equipments`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Plants and Machineries`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Buildings`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Softwares`]: {
+          accountType: 'Fixed Asset',
+        },
+        [t`Accumulated Depreciation`]: {
+          accountType: 'Accumulated Depreciation',
+        },
+      },
+      [t`Investments`]: {
+        isGroup: true,
+      },
+      [t`Temporary Accounts`]: {
+        [t`Temporary Opening`]: {
+          accountType: 'Temporary',
+        },
+      },
+      rootType: 'Asset',
+    },
+    [t`Expenses`]: {
+      [t`Direct Expenses`]: {
+        [t`Stock Expenses`]: {
+          [t`Cost of Goods Sold`]: {
+            accountType: 'Cost of Goods Sold',
+          },
+          [t`Expenses Included In Valuation`]: {
+            accountType: 'Expenses Included In Valuation',
+          },
+          [t`Stock Adjustment`]: {
+            accountType: 'Stock Adjustment',
+          },
+        },
+      },
+      [t`Indirect Expenses`]: {
+        [t`Administrative Expenses`]: {},
+        [t`Commission on Sales`]: {},
+        [t`Depreciation`]: {
+          accountType: 'Depreciation',
+        },
+        [t`Entertainment Expenses`]: {},
+        [t`Freight and Forwarding Charges`]: {
+          accountType: 'Chargeable',
+        },
+        [t`Legal Expenses`]: {},
+        [t`Marketing Expenses`]: {
+          accountType: 'Chargeable',
+        },
+        [t`Miscellaneous Expenses`]: {
+          accountType: 'Chargeable',
+        },
+        [t`Office Maintenance Expenses`]: {},
+        [t`Office Rent`]: {},
+        [t`Postal Expenses`]: {},
+        [t`Print and Stationery`]: {},
+        [t`Round Off`]: {
+          accountType: 'Round Off',
+        },
+        [t`Salary`]: {},
+        [t`Sales Expenses`]: {},
+        [t`Telephone Expenses`]: {},
+        [t`Travel Expenses`]: {},
+        [t`Utility Expenses`]: {},
+        [t`Write Off`]: {},
+        [t`Exchange Gain/Loss`]: {},
+        [t`Gain/Loss on Asset Disposal`]: {},
+      },
+      rootType: 'Expense',
+    },
+    [t`Income`]: {
+      [t`Direct Income`]: {
+        [t`Sales`]: {},
+        [t`Service`]: {},
+      },
+      [t`Indirect Income`]: {
+        isGroup: true,
+      },
+      rootType: 'Income',
+    },
+    [t`Source of Funds (Liabilities)`]: {
+      [t`Current Liabilities`]: {
+        [t`Accounts Payable`]: {
+          [t`Creditors`]: {
+            accountType: 'Payable',
+          },
+          [t`Payroll Payable`]: {},
+        },
+        [t`Stock Liabilities`]: {
+          [t`Stock Received But Not Billed`]: {
+            accountType: 'Stock Received But Not Billed',
+          },
+        },
+        [t`Duties and Taxes`]: {
+          accountType: 'Tax',
+          isGroup: true,
+        },
+        [t`Loans (Liabilities)`]: {
+          [t`Secured Loans`]: {},
+          [t`Unsecured Loans`]: {},
+          [t`Bank Overdraft Account`]: {},
+        },
+      },
+      rootType: 'Liability',
+    },
+    [t`Equity`]: {
+      [t`Capital Stock`]: {
+        accountType: 'Equity',
+      },
+      [t`Dividends Paid`]: {
+        accountType: 'Equity',
+      },
+      [t`Opening Balance Equity`]: {
+        accountType: 'Equity',
+      },
+      [t`Retained Earnings`]: {
+        accountType: 'Equity',
+      },
+      rootType: 'Equity',
+    },
+  };
+}
+
+=== FILE: src\setup\types.ts (0.27 KB) ===
+export interface SetupWizardOptions {
+  logo: string | null;
+  companyName: string;
+  country: string;
+  fullname: string;
+  email: string;
+  bankName: string;
+  currency: string;
+  fiscalYearStart: string;
+  fiscalYearEnd: string;
+  chartOfAccounts: string;
+}
+
+--- FOLDER: src\regional ---
+=== FILE: src\regional\index.ts (0.23 KB) ===
+import { Fyo } from 'fyo';
+import { createIndianRecords } from './in/in';
+
+export async function createRegionalRecords(country: string, fyo: Fyo) {
+  if (country === 'India') {
+    await createIndianRecords(fyo);
+  }
+
+  return;
+}
+
+=== FILE: src\regional\in\in.ts (1.04 KB) ===
+import { Fyo } from 'fyo';
+
+export type TaxType = 'GST' | 'IGST' | 'Exempt-GST' | 'Exempt-IGST';
+
+export async function createIndianRecords(fyo: Fyo) {
+  await createTaxes(fyo);
+}
+
+async function createTaxes(fyo: Fyo) {
+  const GSTs = {
+    GST: [28, 18, 12, 6, 5, 3, 0.25, 0],
+    IGST: [28, 18, 12, 6, 5, 3, 0.25, 0],
+    'Exempt-GST': [0],
+    'Exempt-IGST': [0],
+  };
+
+  for (const type of Object.keys(GSTs)) {
+    for (const percent of GSTs[type as TaxType]) {
+      const name = `${type}-${percent}`;
+      const details = getTaxDetails(type as TaxType, percent);
+
+      const newTax = fyo.doc.getNewDoc('Tax', { name, details });
+      await newTax.sync();
+    }
+  }
+}
+
+function getTaxDetails(type: TaxType, percent: number) {
+  if (type === 'GST') {
+    return [
+      {
+        account: 'CGST',
+        rate: percent / 2,
+      },
+      {
+        account: 'SGST',
+        rate: percent / 2,
+      },
+    ];
+  }
+
+  return [
+    {
+      account: type.toString().split('-')[0],
+      rate: percent,
+    },
+  ];
+}
+
+=== CONFIG FILES ===
+=== FILE: tailwind.config.js (1.84 KB) ===
+const fs = require('fs');
+const colors = JSON.parse(
+  fs.readFileSync('colors.json', { encoding: 'utf-8' })
+);
+
+module.exports = {
+  darkMode: 'class',
+  purge: false,
+  theme: {
+    fontFamily: {
+      sans: ['Inter', 'sans-serif'],
+    },
+    screens: {
+      sm: '640px',
+      md: '768px',
+      lg: '1024px',
+      xl: '1280px',
+    },
+    fontSize: {
+      xs: '11px',
+      sm: '12px',
+      base: '13px',
+      lg: '14px',
+      xl: '18px',
+      '2xl': '20px',
+      '3xl': '24px',
+      '4xl': '28px',
+    },
+    extend: {
+      maxHeight: {
+        64: '16rem',
+      },
+      minWidth: {
+        40: '10rem',
+        56: '14rem',
+      },
+      maxWidth: {
+        32: '8rem',
+        56: '14rem',
+      },
+      spacing: {
+        7: '1.75rem',
+        14: '3.5rem',
+        18: '4.5rem',
+        28: '7rem',
+        72: '18rem',
+        80: '20rem',
+      },
+      boxShadow: {
+        'outline-px': '0 0 0 1px rgba(66, 153, 225, 0.5)',
+        DEFAULT: '0 2px 4px 0 rgba(0, 0, 0, 0.05)',
+        md: '0 0 2px 0 rgba(0, 0, 0, 0.10), 0 2px 4px 0 rgba(0, 0, 0, 0.08)',
+        button: '0 0.5px 0 0 rgba(0, 0, 0, 0.08)',
+      },
+      borderRadius: {
+        sm: '0.25rem', // 4px
+        DEFAULT: '0.313rem', // 5px
+        md: '0.375rem', // 6px
+        lg: '0.5rem', // 8px
+        xl: '0.75rem', // 12px
+      },
+      gridColumn: {
+        'span-full': '1 / -1',
+      },
+      colors,
+    },
+  },
+  variants: {
+    margin: ['responsive', 'first', 'last', 'hover', 'focus'],
+    backgroundColor: [
+      'responsive',
+      'first',
+      'hover',
+      'focus',
+      'focus-within',
+      'dark',
+    ],
+    display: ['group-hover'],
+    borderWidth: ['last'],
+    fontWeight: ['dark'],
+  },
+  plugins: [require('tailwindcss-rtl')],
+};
+
+/*
+ * 208, 100, 50
+ * 209,  62, 50
+ */
+
+=== FILE: vite.config.ts (1.34 KB) ===
+import vue from '@vitejs/plugin-vue';
+import path from 'path';
+import { defineConfig } from 'vite';
+
+/**
+ * This vite config file is used only for dev mode, i.e.
+ * to create a serve build modules of the source code
+ * which will be rendered by electron.
+ *
+ * For building the project, vite is used programmatically
+ * see build/scripts/build.mjs for this.
+ */
+export default () => {
+  let port = 6969;
+  let host = '0.0.0.0';
+  if (process.env.VITE_PORT && process.env.VITE_HOST) {
+    port = Number(process.env.VITE_PORT);
+    host = process.env.VITE_HOST;
+  }
+
+  return defineConfig({
+    server: { host, port, strictPort: true },
+    root: path.resolve(__dirname, './src'),
+    plugins: [vue()],
+    resolve: {
+      alias: {
+        vue: 'vue/dist/vue.esm-bundler.js',
+        fyo: path.resolve(__dirname, './fyo'),
+        src: path.resolve(__dirname, './src'),
+        schemas: path.resolve(__dirname, './schemas'),
+        backend: path.resolve(__dirname, './backend'),
+        models: path.resolve(__dirname, './models'),
+        utils: path.resolve(__dirname, './utils'),
+        regional: path.resolve(__dirname, './regional'),
+        reports: path.resolve(__dirname, './reports'),
+        dummy: path.resolve(__dirname, './dummy'),
+        fixtures: path.resolve(__dirname, './fixtures'),
+      },
+    },
+  });
+};
+
+=== FILE: tsconfig.json (1.31 KB) ===
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "esnext",
+    "strict": true,
+    "allowJs": true,
+    "jsx": "preserve",
+    "importHelpers": true,
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "types": ["webpack-env"],
+    "baseUrl": ".",
+    "paths": {
+      "src/*": ["src/*"],
+      "schemas/*": ["schemas/*"],
+      "main/*": ["main/*"],
+      "backend/*": ["backend/*"],
+      "regional/*": ["regional/*"],
+      "fixtures/*": ["fixtures/*"],
+      "reports/*": ["reports/*"],
+      "models/*": ["models/*"],
+      "utils/*": ["utils/*"],
+      "dummy/*": ["dummy/*"]
+    },
+    "lib": ["esnext", "dom", "dom.iterable", "scripthost"]
+  },
+  "ts-node": {
+    "files": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.vue",
+    "schemas/**/*.ts",
+    "backend/**/*.ts",
+    "fyo/**/*.ts",
+    "models/**/*.ts",
+    "patches/**/*.ts",
+    "patches/**/*.js",
+    "reports/**/*.ts",
+    "accounting/**/*.ts",
+    "scripts/**/*.ts",
+    "main/**/*.ts",
+    "regional/**/*.ts",
+    "reports/**/*.ts",
+    "utils/**/*.ts",
+    "tests/**/*.ts",
+    "dummy/**/*.ts",
+    "jobs/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}
+
+=== FILE: colors.json (3.24 KB) ===
+{
+  "black": "#1E293B",
+  "gray": {
+    "25": "#FBFBFB",
+    "50": "#F8F8F8",
+    "100": "#F3F3F3",
+    "200": "#EDEDED",
+    "300": "#E2E2E2",
+    "400": "#C7C7C7",
+    "500": "#999999",
+    "600": "#7C7C7C",
+    "700": "#525252",
+    "800": "#383838",
+    "850": "#282828",
+    "875": "#212121",
+    "890": "#1C1C1C",
+    "900": "#171717"
+  },
+  "red": {
+    "50": "#FFF7F7",
+    "100": "#FFF0F0",
+    "200": "#FCD7D7",
+    "300": "#F9C6C6",
+    "400": "#EB9091",
+    "500": "#E03636",
+    "600": "#CC2929",
+    "700": "#B52A2A",
+    "800": "#941F1F",
+    "900": "#6B1515"
+  },
+  "orange": {
+    "50": "#FFF9F5",
+    "100": "#FFF1E7",
+    "200": "#FCE6D5",
+    "300": "#F7D6BD",
+    "400": "#F0B58B",
+    "500": "#E86C13",
+    "600": "#D45A08",
+    "700": "#BD3E0C",
+    "800": "#9E3513",
+    "900": "#6B2711"
+  },
+  "yellow": {
+    "50": "#FFFCEF",
+    "100": "#FFF7D3",
+    "200": "#F7E9A8",
+    "300": "#F5E171",
+    "400": "#F2D14B",
+    "500": "#EDBA13",
+    "600": "#D1930D",
+    "700": "#AB6E05",
+    "800": "#8C5600",
+    "900": "#733F12"
+  },
+  "green": {
+    "50": "#F3FCF5",
+    "100": "#E4F5E9",
+    "200": "#DAF0E1",
+    "300": "#CAE5D4",
+    "400": "#B6DEC5",
+    "500": "#59BA8B",
+    "600": "#30A66D",
+    "700": "#278F5E",
+    "800": "#16794C",
+    "900": "#173B2C"
+  },
+  "teal": {
+    "50": "#F0FDFA",
+    "100": "#E6F7F4",
+    "200": "#BAE8E1",
+    "300": "#97DED4",
+    "400": "#73D1C4",
+    "500": "#36BAAD",
+    "600": "#0B9E92",
+    "700": "#0F736B",
+    "800": "#115C57",
+    "900": "#114541"
+  },
+  "blue": {
+    "50": "#F7FBFD",
+    "100": "#EDF6FD",
+    "200": "#E3F1FD",
+    "300": "#C9E7FC",
+    "400": "#70B6F0",
+    "500": "#33A1FF",
+    "600": "#007BE0",
+    "700": "#0070CC",
+    "800": "#005CA3",
+    "900": "#004880"
+  },
+  "indigo": {
+    "100": "#ebf4ff",
+    "200": "#c3dafe",
+    "300": "#a3bffa",
+    "400": "#7f9cf5",
+    "500": "#667eea",
+    "600": "#5a67d8",
+    "700": "#4c51bf",
+    "800": "#434190",
+    "900": "#3c366b"
+  },
+  "purple": {
+    "50": "#FDFAFF",
+    "100": "#F9F0FF",
+    "200": "#F1E5FA",
+    "300": "#E9D6F5",
+    "400": "#D6C1E6",
+    "500": "#9C45E3",
+    "600": "#8642C2",
+    "700": "#6E399D",
+    "800": "#5C2F83",
+    "900": "#401863"
+  },
+  "pink": {
+    "50": "#FFF7FC",
+    "100": "#FEEEF8",
+    "200": "#F8E2F0",
+    "300": "#F2D4E6",
+    "400": "#E9C4DA",
+    "500": "#DF9EB8",
+    "600": "#CF3A96",
+    "700": "#9C2671",
+    "800": "#801458",
+    "900": "#570F3E"
+  },
+  "violet": {
+    "50": "#FBFAFF",
+    "100": "#F5F2FF",
+    "200": "#E5E1FA",
+    "300": "#DAD2F7",
+    "400": "#BDB1F0",
+    "500": "#6846E3",
+    "600": "#5F46C7",
+    "700": "#4F3DA1",
+    "800": "#392980",
+    "900": "#251959"
+  },
+  "cyan": {
+    "50": "#F5FBFC",
+    "100": "#E0F8FF",
+    "200": "#B3ECFC",
+    "300": "#94E6FF",
+    "400": "#6BD3F2",
+    "500": "#34BAE3",
+    "600": "#32A4C7",
+    "700": "#267A94",
+    "800": "#125C73",
+    "900": "#164759"
+  },
+  "amber": {
+    "50": "#FDFAED",
+    "100": "#FCF3CF",
+    "200": "#F7E28D",
+    "300": "#F5D261",
+    "400": "#F2BE3A",
+    "500": "#E79913",
+    "600": "#DB7706",
+    "700": "#B35309",
+    "800": "#91400D",
+    "900": "#763813"
+  }
+}
+
+=== FILE: postcss.config.js (0.08 KB) ===
+module.exports = {
+  plugins: [require('tailwindcss'), require('autoprefixer')],
+};
+

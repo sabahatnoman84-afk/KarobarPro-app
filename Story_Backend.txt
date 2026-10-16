@@ -1,0 +1,3210 @@
+﻿
+=== BACKEND FOLDER STRUCTURE ===
+backend\database
+backend\patches
+backend\database\tests
+backend\patches\v0_21_0
+
+=== FILE LIST ===
+backend\helpers.ts | 1.91 KB
+backend\database\bespoke.ts | 14.13 KB
+backend\database\core.ts | 27.57 KB
+backend\database\manager.ts | 6.38 KB
+backend\database\runPatch.ts | 1.58 KB
+backend\database\types.ts | 1.91 KB
+backend\database\tests\helpers.ts | 4.63 KB
+backend\database\tests\testCore.spec.ts | 17.54 KB
+backend\patches\addUOMs.ts | 0.73 KB
+backend\patches\createInventoryNumberSeries.ts | 1.08 KB
+backend\patches\createPaymentMethods.ts | 1.54 KB
+backend\patches\fixItemHSNField.ts | 0.29 KB
+backend\patches\fixRoundOffAccount.ts | 1.32 KB
+backend\patches\index.ts | 1.42 KB
+backend\patches\setPaymentReferenceType.ts | 0.43 KB
+backend\patches\testPatch.ts | 0.34 KB
+backend\patches\updateSchemas.ts | 10.21 KB
+backend\patches\v0_21_0\fixLedgerDateTime.ts | 1.38 KB
+
+=== MAIN.TS CONTENT ===
+======================================================================
+FILE: main.ts
+======================================================================
+// eslint-disable-next-line
+require('source-map-support').install({
+  handleUncaughtException: false,
+  environment: 'node',
+});
+
+import { emitMainProcessError } from 'backend/helpers';
+import {
+  app,
+  BrowserWindow,
+  BrowserWindowConstructorOptions,
+  protocol,
+  ProtocolRequest,
+  ProtocolResponse,
+} from 'electron';
+import { autoUpdater } from 'electron-updater';
+import fs from 'fs';
+import path from 'path';
+import registerAppLifecycleListeners from './main/registerAppLifecycleListeners';
+import registerAutoUpdaterListeners from './main/registerAutoUpdaterListeners';
+import registerIpcMainActionListeners from './main/registerIpcMainActionListeners';
+import registerIpcMainMessageListeners from './main/registerIpcMainMessageListeners';
+import registerProcessListeners from './main/registerProcessListeners';
+
+export class Main {
+  title = 'KarobarPro';
+  icon: string;
+
+  winURL = '';
+  checkedForUpdate = false;
+  mainWindow: BrowserWindow | null = null;
+
+  WIDTH = 1200;
+  HEIGHT = process.platform === 'win32' ? 826 : 800;
+
+  constructor() {
+    this.icon = this.isDevelopment
+      ? path.resolve('./build/icon.png')
+      : path.join(__dirname, 'icons', '512x512.png');
+
+    protocol.registerSchemesAsPrivileged([
+      { scheme: 'app', privileges: { secure: true, standard: true } },
+    ]);
+
+    if (this.isDevelopment) {
+      autoUpdater.logger = console;
+    }
+
+    // https://github.com/electron-userland/electron-builder/issues/4987
+    app.commandLine.appendSwitch('disable-http2');
+    autoUpdater.requestHeaders = {
+      'Cache-Control':
+        'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+    };
+
+    this.registerListeners();
+    if (this.isMac && this.isDevelopment) {
+      app.dock.setIcon(this.icon);
+    }
+  }
+
+  get isDevelopment() {
+    return process.env.NODE_ENV === 'development';
+  }
+
+  get isTest() {
+    return !!process.env.IS_TEST;
+  }
+
+  get isMac() {
+    return process.platform === 'darwin';
+  }
+
+  get isLinux() {
+    return process.platform === 'linux';
+  }
+
+  registerListeners() {
+    registerIpcMainMessageListeners(this);
+    registerIpcMainActionListeners(this);
+    registerAutoUpdaterListeners(this);
+    registerAppLifecycleListeners(this);
+    registerProcessListeners(this);
+  }
+
+  getOptions(): BrowserWindowConstructorOptions {
+    const preload = path.join(__dirname, 'main', 'preload.js');
+    const options: BrowserWindowConstructorOptions = {
+      width: this.WIDTH,
+      height: this.HEIGHT,
+      title: this.title,
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 16, y: 16 },
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        preload,
+      },
+      autoHideMenuBar: true,
+      frame: !this.isMac,
+      resizable: true,
+    };
+
+    if (this.isDevelopment || this.isLinux) {
+      Object.assign(options, { icon: this.icon });
+    }
+
+    if (this.isLinux) {
+      Object.assign(options, {
+        icon: path.join(__dirname, '/icons/512x512.png'),
+      });
+    }
+
+    return options;
+  }
+
+  async createWindow() {
+    const options = this.getOptions();
+    this.mainWindow = new BrowserWindow(options);
+
+    if (this.isDevelopment) {
+      this.setViteServerURL();
+    } else {
+      this.registerAppProtocol();
+    }
+
+    await this.mainWindow.loadURL(this.winURL);
+    if (this.isDevelopment && !this.isTest) {
+      this.mainWindow.webContents.openDevTools();
+    }
+
+    this.setMainWindowListeners();
+  }
+
+  setViteServerURL() {
+    let port = 6969;
+    let host = '0.0.0.0';
+
+    if (process.env.VITE_PORT && process.env.VITE_HOST) {
+      port = Number(process.env.VITE_PORT);
+      host = process.env.VITE_HOST;
+    }
+
+    // Load the url of the dev server if in development mode
+    this.winURL = `http://${host}:${port}/`;
+  }
+
+  registerAppProtocol() {
+    protocol.registerBufferProtocol('app', bufferProtocolCallback);
+
+    // Use the registered protocol url to load the files.
+    this.winURL = 'app://./index.html';
+  }
+
+  setMainWindowListeners() {
+    if (this.mainWindow === null) {
+      return;
+    }
+
+    this.mainWindow.on('closed', () => {
+      this.mainWindow = null;
+    });
+
+    this.mainWindow.webContents.on('did-fail-load', () => {
+      this.mainWindow!.loadURL(this.winURL).catch((err) =>
+        emitMainProcessError(err)
+      );
+    });
+  }
+}
+
+/**
+ * Callback used to register the custom app protocol,
+ * during prod, files are read and served by using this
+ * protocol.
+ */
+function bufferProtocolCallback(
+  request: ProtocolRequest,
+  callback: (response: ProtocolResponse) => void
+) {
+  const { pathname, host } = new URL(request.url);
+  const filePath = path.join(
+    __dirname,
+    'src',
+    decodeURI(host),
+    decodeURI(pathname)
+  );
+
+  fs.readFile(filePath, (_, data) => {
+    const extension = path.extname(filePath).toLowerCase();
+    const mimeType =
+      {
+        '.js': 'text/javascript',
+        '.css': 'text/css',
+        '.html': 'text/html',
+        '.svg': 'image/svg+xml',
+        '.json': 'application/json',
+      }[extension] ?? '';
+
+    callback({ mimeType, data });
+  });
+}
+
+export default new Main();
+
+=== BACKEND FILE CONTENTS ===
+======================================================================
+FILE: backend\helpers.ts
+======================================================================
+import { constants } from 'fs';
+import fs from 'fs/promises';
+import { DatabaseMethod } from 'utils/db/types';
+import { CUSTOM_EVENTS } from 'utils/messages';
+import { KnexColumnType } from './database/types';
+
+export const sqliteTypeMap: Record<string, KnexColumnType> = {
+  AutoComplete: 'text',
+  Currency: 'text',
+  Int: 'integer',
+  Float: 'float',
+  Percent: 'float',
+  Check: 'boolean',
+  Code: 'text',
+  Date: 'date',
+  Datetime: 'datetime',
+  Time: 'time',
+  Text: 'text',
+  Data: 'text',
+  Secret: 'text',
+  Link: 'text',
+  DynamicLink: 'text',
+  Password: 'text',
+  Select: 'text',
+  Attachment: 'text',
+  AttachImage: 'text',
+  Color: 'text',
+};
+
+export const SYSTEM = '__SYSTEM__';
+export const validTypes = Object.keys(sqliteTypeMap);
+export function getDefaultMetaFieldValueMap() {
+  const now = new Date().toISOString();
+  return {
+    createdBy: SYSTEM,
+    modifiedBy: SYSTEM,
+    created: now,
+    modified: now,
+  };
+}
+
+export const databaseMethodSet: Set<DatabaseMethod> = new Set([
+  'insert',
+  'get',
+  'getAll',
+  'getSingleValues',
+  'rename',
+  'update',
+  'delete',
+  'deleteAll',
+  'close',
+  'exists',
+]);
+
+export function emitMainProcessError(
+  error: unknown,
+  more?: Record<string, unknown>
+) {
+  (
+    process.emit as (
+      event: string,
+      error: unknown,
+      more?: Record<string, unknown>
+    ) => void
+  )(CUSTOM_EVENTS.MAIN_PROCESS_ERROR, error, more);
+}
+
+export async function checkFileAccess(filePath: string, mode?: number) {
+  mode ??= constants.W_OK;
+  return await fs
+    .access(filePath, mode)
+    .then(() => true)
+    .catch(() => false);
+}
+
+export async function unlinkIfExists(filePath: unknown) {
+  if (!filePath || typeof filePath !== 'string') {
+    return false;
+  }
+
+  const exists = await checkFileAccess(filePath);
+  if (exists) {
+    await fs.unlink(filePath);
+    return true;
+  }
+
+  return false;
+}
+
+======================================================================
+FILE: backend\database\bespoke.ts
+======================================================================
+import {
+  Cashflow,
+  IncomeExpense,
+  TopExpenses,
+  TotalCreditAndDebit,
+  TotalOutstanding,
+} from 'utils/db/types';
+import { ModelNameEnum } from '../../models/types';
+import DatabaseCore from './core';
+import { BespokeFunction } from './types';
+import { DocItem, ReturnDocItem } from 'models/inventory/types';
+import { safeParseFloat } from 'utils/index';
+
+export class BespokeQueries {
+  [key: string]: BespokeFunction;
+
+  static async getLastInserted(
+    db: DatabaseCore,
+    schemaName: string
+  ): Promise<number> {
+    const lastInserted = (await db.knex!.raw(
+      'select cast(name as int) as num from ?? order by num desc limit 1',
+      [schemaName]
+    )) as { num: number }[];
+
+    const num = lastInserted?.[0]?.num;
+    if (num === undefined) {
+      return 0;
+    }
+    return num;
+  }
+
+  static async getTopExpenses(
+    db: DatabaseCore,
+    fromDate: string,
+    toDate: string
+  ) {
+    const expenseAccounts = db
+      .knex!.select('name')
+      .from('Account')
+      .where('rootType', 'Expense');
+
+    const topExpenses = await db
+      .knex!.select({
+        total: db.knex!.raw('sum(cast(debit as real) - cast(credit as real))'),
+      })
+      .select('account')
+      .from('AccountingLedgerEntry')
+      .where('reverted', false)
+      .where('account', 'in', expenseAccounts)
+      .whereBetween('date', [fromDate, toDate])
+      .groupBy('account')
+      .orderBy('total', 'desc')
+      .limit(5);
+    return topExpenses as TopExpenses;
+  }
+
+  static async getTotalOutstanding(
+    db: DatabaseCore,
+    schemaName: string,
+    fromDate: string,
+    toDate: string
+  ) {
+    return (await db.knex!(schemaName)
+      .sum({ total: 'baseGrandTotal' })
+      .sum({ outstanding: 'outstandingAmount' })
+      .where('submitted', true)
+      .where('cancelled', false)
+      .whereBetween('date', [fromDate, toDate])
+      .first()) as TotalOutstanding;
+  }
+
+  static async getCashflow(db: DatabaseCore, fromDate: string, toDate: string) {
+    const cashAndBankAccounts = db.knex!('Account')
+      .select('name')
+      .where('accountType', 'in', ['Cash', 'Bank'])
+      .andWhere('isGroup', false);
+    const dateAsMonthYear = db.knex!.raw(`strftime('%Y-%m', ??)`, 'date');
+    return (await db.knex!('AccountingLedgerEntry')
+      .where('reverted', false)
+      .sum({
+        inflow: 'debit',
+        outflow: 'credit',
+      })
+      .select({
+        yearmonth: dateAsMonthYear,
+      })
+      .where('account', 'in', cashAndBankAccounts)
+      .whereBetween('date', [fromDate, toDate])
+      .groupBy(dateAsMonthYear)) as Cashflow;
+  }
+
+  static async getIncomeAndExpenses(
+    db: DatabaseCore,
+    fromDate: string,
+    toDate: string
+  ) {
+    const income = (await db.knex!.raw(
+      `
+      select sum(cast(credit as real) - cast(debit as real)) as balance, strftime('%Y-%m', date) as yearmonth
+      from AccountingLedgerEntry
+      where
+        reverted = false and
+        date between date(?) and date(?) and
+        account in (
+          select name
+          from Account
+          where rootType = 'Income'
+        )
+      group by yearmonth`,
+      [fromDate, toDate]
+    )) as IncomeExpense['income'];
+
+    const expense = (await db.knex!.raw(
+      `
+      select sum(cast(debit as real) - cast(credit as real)) as balance, strftime('%Y-%m', date) as yearmonth
+      from AccountingLedgerEntry
+      where
+        reverted = false and
+        date between date(?) and date(?) and
+        account in (
+          select name
+          from Account
+          where rootType = 'Expense'
+        )
+      group by yearmonth`,
+      [fromDate, toDate]
+    )) as IncomeExpense['expense'];
+
+    return { income, expense };
+  }
+
+  static async getTotalCreditAndDebit(db: DatabaseCore) {
+    return (await db.knex!.raw(`
+    select 
+	    account, 
+      sum(cast(credit as real)) as totalCredit, 
+      sum(cast(debit as real)) as totalDebit
+    from AccountingLedgerEntry
+    group by account
+    `)) as unknown as TotalCreditAndDebit;
+  }
+
+  static async getStockQuantity(
+    db: DatabaseCore,
+    item: string,
+    location?: string,
+    fromDate?: string,
+    toDate?: string,
+    batch?: string,
+    serialNumbers?: string[]
+  ): Promise<number | null> {
+    /* eslint-disable @typescript-eslint/no-floating-promises */
+    const query = db.knex!(ModelNameEnum.StockLedgerEntry)
+      .sum('quantity')
+      .where('item', item);
+
+    if (location) {
+      query.andWhere('location', location);
+    }
+
+    if (batch) {
+      query.andWhere('batch', batch);
+    }
+
+    if (serialNumbers?.length) {
+      query.andWhere('serialNumber', 'in', serialNumbers);
+    }
+
+    if (fromDate) {
+      query.andWhereRaw('datetime(date) > datetime(?)', [fromDate]);
+    }
+
+    if (toDate) {
+      query.andWhereRaw('datetime(date) < datetime(?)', [toDate]);
+    }
+
+    const value = (await query) as Record<string, number | null>[];
+    if (!value.length) {
+      return null;
+    }
+
+    return value[0][Object.keys(value[0])[0]];
+  }
+
+  static async getReturnBalanceItemsQty(
+    db: DatabaseCore,
+    schemaName: ModelNameEnum,
+    docName: string
+  ): Promise<Record<string, ReturnDocItem> | undefined> {
+    const returnDocNames = (
+      await db.knex!(schemaName)
+        .select('name')
+        .where('returnAgainst', docName)
+        .andWhere('submitted', true)
+        .andWhere('cancelled', false)
+    ).map((i: { name: string }) => i.name);
+
+    if (!returnDocNames.length) {
+      return;
+    }
+
+    const returnedItemsQuery = db.knex!(`${schemaName}Item`)
+      .sum({ quantity: 'quantity' })
+      .whereIn('parent', returnDocNames);
+
+    const docItemsQuery = db.knex!(`${schemaName}Item`)
+      .where('parent', docName)
+      .sum({ quantity: 'quantity' });
+
+    if (
+      [ModelNameEnum.SalesInvoice, ModelNameEnum.PurchaseInvoice].includes(
+        schemaName
+      )
+    ) {
+      returnedItemsQuery.select('item', 'batch').groupBy('item', 'batch');
+      docItemsQuery.select('name', 'item', 'batch').groupBy('item', 'batch');
+    }
+
+    if (
+      [ModelNameEnum.Shipment, ModelNameEnum.PurchaseReceipt].includes(
+        schemaName
+      )
+    ) {
+      returnedItemsQuery
+        .select('item', 'batch', 'serialNumber')
+        .groupBy('item', 'batch', 'serialNumber');
+      docItemsQuery
+        .select('name', 'item', 'batch', 'serialNumber')
+        .groupBy('item', 'batch', 'serialNumber');
+    }
+
+    const returnedItems = (await returnedItemsQuery) as DocItem[];
+    if (!returnedItems.length) {
+      return;
+    }
+    const docItems = (await docItemsQuery) as DocItem[];
+
+    const docItemsMap = BespokeQueries.#getDocItemMap(docItems);
+    const returnedItemsMap = BespokeQueries.#getDocItemMap(returnedItems);
+
+    const returnBalanceItems = BespokeQueries.#getReturnBalanceItemQtyMap(
+      docItemsMap,
+      returnedItemsMap
+    );
+    return returnBalanceItems;
+  }
+
+  static #getDocItemMap(docItems: DocItem[]): Record<string, ReturnDocItem> {
+    const docItemsMap: Record<string, ReturnDocItem> = {};
+    const batchesMap:
+      | Record<
+          string,
+          { quantity: number; serialNumbers?: string[] | undefined }
+        >
+      | undefined = {};
+
+    for (const item of docItems) {
+      if (!!docItemsMap[item.item]) {
+        if (item.batch) {
+          let serialNumbers: string[] | undefined;
+
+          if (!docItemsMap[item.item].batches![item.batch]) {
+            docItemsMap[item.item].batches![item.batch] = {
+              quantity: item.quantity,
+              serialNumbers,
+            };
+          } else {
+            docItemsMap[item.item].batches![item.batch] = {
+              quantity: (docItemsMap[item.item].batches![item.batch].quantity +=
+                item.quantity),
+              serialNumbers,
+            };
+          }
+        } else {
+          docItemsMap[item.item].quantity += item.quantity;
+        }
+
+        if (item.serialNumber) {
+          const serialNumbers: string[] = [];
+
+          if (docItemsMap[item.item].serialNumbers) {
+            serialNumbers.push(...(docItemsMap[item.item].serialNumbers ?? []));
+          }
+
+          serialNumbers.push(...item.serialNumber.split('\n'));
+          docItemsMap[item.item].serialNumbers = serialNumbers;
+        }
+        continue;
+      }
+
+      if (item.batch) {
+        let serialNumbers: string[] | undefined = undefined;
+        if (item.serialNumber) {
+          serialNumbers = item.serialNumber.split('\n');
+        }
+
+        batchesMap[item.batch] = {
+          serialNumbers,
+          quantity: item.quantity,
+        };
+      }
+
+      let serialNumbers: string[] | undefined = undefined;
+
+      if (!item.batch && item.serialNumber) {
+        serialNumbers = item.serialNumber.split('\n');
+      }
+
+      docItemsMap[item.item] = {
+        serialNumbers,
+        batches: batchesMap,
+        quantity: item.quantity,
+      };
+    }
+    return docItemsMap;
+  }
+
+  static #getReturnBalanceItemQtyMap(
+    docItemsMap: Record<string, ReturnDocItem>,
+    returnedItemsMap: Record<string, ReturnDocItem>
+  ): Record<string, ReturnDocItem> {
+    const returnBalanceItems: Record<string, ReturnDocItem> | undefined = {};
+    const balanceBatchQtyMap:
+      | Record<
+          string,
+          { quantity: number; serialNumbers: string[] | undefined }
+        >
+      | undefined = {};
+
+    for (const row in docItemsMap) {
+      const balanceSerialNumbersMap: string[] | undefined = [];
+      let balanceQty = safeParseFloat(-docItemsMap[row].quantity);
+      const docItem = docItemsMap[row];
+      const returnedDocItem = returnedItemsMap[row];
+      const docItemHasBatch = !!Object.keys(docItem.batches ?? {}).length;
+
+      if (returnedItemsMap) {
+        for (const item in returnedItemsMap) {
+          if (docItemHasBatch && item !== row) {
+            continue;
+          }
+
+          balanceQty = -(
+            Math.abs(balanceQty) + returnedItemsMap[item].quantity
+          );
+
+          const returnedItem = returnedItemsMap[item];
+
+          if (docItem.serialNumbers && returnedItem.serialNumbers) {
+            for (const serialNumber of docItem.serialNumbers) {
+              if (!returnedItem.serialNumbers.includes(serialNumber)) {
+                balanceSerialNumbersMap.push(serialNumber);
+              }
+            }
+          }
+        }
+      }
+
+      if (docItemHasBatch && docItem.batches) {
+        for (const batch in docItem.batches) {
+          const docItemSerialNumbers = docItem.batches[batch].serialNumbers;
+          const itemSerialNumbers = docItem.batches[batch].serialNumbers;
+          let balanceSerialNumbers: string[] | undefined;
+
+          if (docItemSerialNumbers && itemSerialNumbers) {
+            balanceSerialNumbers = docItemSerialNumbers.filter(
+              (serialNumber: string) =>
+                itemSerialNumbers.indexOf(serialNumber) == -1
+            );
+          }
+
+          const ItemQty = Math.abs(docItem.batches[batch].quantity);
+          let balanceQty = safeParseFloat(-ItemQty);
+
+          if (!returnedDocItem || !returnedDocItem?.batches) {
+            continue;
+          }
+
+          const returnedItem = returnedDocItem?.batches[batch];
+
+          if (!returnedItem) {
+            balanceBatchQtyMap[batch] = {
+              quantity: balanceQty,
+              serialNumbers: balanceSerialNumbers,
+            };
+            continue;
+          }
+
+          balanceQty = -(
+            Math.abs(safeParseFloat(-ItemQty)) -
+            Math.abs(returnedDocItem.batches[batch].quantity)
+          );
+
+          balanceBatchQtyMap[batch] = {
+            quantity: balanceQty,
+            serialNumbers: balanceSerialNumbers,
+          };
+        }
+      }
+
+      returnBalanceItems[row] = {
+        quantity: balanceQty,
+        batches: balanceBatchQtyMap,
+        serialNumbers: balanceSerialNumbersMap,
+      };
+    }
+
+    return returnBalanceItems;
+  }
+
+  static async getPOSTransactedAmount(
+    db: DatabaseCore,
+    fromDate: Date,
+    toDate: Date,
+    lastShiftClosingDate?: Date
+  ): Promise<Record<string, number> | undefined> {
+    const invoicesQuery = db.knex!(ModelNameEnum.SalesInvoice)
+      .select('name', 'returnAgainst')
+      .where('isPOS', true)
+      .andWhereBetween('date', [fromDate.toISOString(), toDate.toISOString()]);
+
+    if (lastShiftClosingDate) {
+      invoicesQuery.andWhere(
+        'created',
+        '>',
+        lastShiftClosingDate.toISOString()
+      );
+    }
+
+    const invoices = (await invoicesQuery) as {
+      name: string;
+      returnAgainst: string | null;
+    }[];
+
+    if (!invoices.length) {
+      return;
+    }
+
+    const sinvNames = invoices.map((row) => row.name);
+    const invoiceSignMap = invoices.reduce<Record<string, number>>(
+      (map, inv) => {
+        map[inv.name] = inv.returnAgainst ? -1 : 1;
+        return map;
+      },
+      {}
+    );
+
+    const paymentEntryNames: string[] = (
+      await db.knex!(ModelNameEnum.PaymentFor)
+        .select('parent', 'referenceName')
+        .whereIn('referenceName', sinvNames)
+    ).map((doc: { parent: string }) => doc.parent);
+
+    if (!paymentEntryNames.length) {
+      return;
+    }
+
+    const groupedAmounts = (await db.knex!(ModelNameEnum.Payment)
+      .select('paymentMethod', 'name')
+      .whereIn('name', paymentEntryNames)
+      .groupBy('paymentMethod', 'name')
+      .sum({ amount: 'amount' })) as {
+      paymentMethod: string;
+      name: string;
+      amount: number;
+    }[];
+
+    const transactedAmounts: Record<string, number> = {};
+
+    for (const row of groupedAmounts) {
+      const paymentRefs = (await db.knex!(ModelNameEnum.PaymentFor)
+        .select('referenceName')
+        .where('parent', row.name)) as { referenceName: string }[];
+
+      for (const ref of paymentRefs) {
+        const sign = invoiceSignMap[ref.referenceName] ?? 1;
+        const signedAmount = Number(row.amount) * sign;
+
+        transactedAmounts[row.paymentMethod] =
+          (transactedAmounts[row.paymentMethod] ?? 0) + signedAmount;
+      }
+    }
+
+    return transactedAmounts;
+  }
+}
+
+======================================================================
+FILE: backend\database\core.ts
+======================================================================
+import { getDbError, NotFoundError, ValueError } from 'fyo/utils/errors';
+import { knex, Knex } from 'knex';
+import {
+  Field,
+  FieldTypeEnum,
+  RawValue,
+  Schema,
+  SchemaMap,
+  TargetField,
+} from '../../schemas/types';
+import {
+  getIsNullOrUndef,
+  getRandomString,
+  getValueMapFromList,
+} from '../../utils';
+import { DatabaseBase, GetAllOptions, QueryFilter } from '../../utils/db/types';
+import { getDefaultMetaFieldValueMap, sqliteTypeMap, SYSTEM } from '../helpers';
+import {
+  AlterConfig,
+  ColumnDiff,
+  FieldValueMap,
+  GetQueryBuilderOptions,
+  MigrationConfig,
+  NonExtantConfig,
+  SingleValue,
+  UpdateSinglesConfig,
+} from './types';
+
+/**
+ * # DatabaseCore
+ * This is the ORM, the DatabaseCore interface (function signatures) should be
+ * replicated by the frontend demuxes and all the backend muxes.
+ *
+ * ## Db Core Call Sequence
+ *
+ * 1. Init core: `const db = new DatabaseCore(dbPath)`.
+ * 2. Connect db: `db.connect()`. This will allow for raw queries to be executed.
+ * 3. Set schemas: `db.setSchemaMap(schemaMap)`. This will allow for ORM functions to be executed.
+ * 4. Migrate: `await db.migrate()`. This will create absent tables and update the tables' shape.
+ * 5. ORM function execution: `db.get(...)`, `db.insert(...)`, etc.
+ * 6. Close connection: `await db.close()`.
+ *
+ * Note: Meta values: created, modified, createdBy, modifiedBy are set by DatabaseCore
+ * only for schemas that are SingleValue. Else they have to be passed by the caller in
+ * the `fieldValueMap`.
+ */
+
+export default class DatabaseCore extends DatabaseBase {
+  knex?: Knex;
+  typeMap = sqliteTypeMap;
+  dbPath: string;
+  schemaMap: SchemaMap = {};
+  connectionParams: Knex.Config;
+
+  constructor(dbPath?: string) {
+    super();
+    this.dbPath = dbPath ?? ':memory:';
+    this.connectionParams = {
+      client: 'better-sqlite3',
+      connection: {
+        filename: this.dbPath,
+      },
+      useNullAsDefault: true,
+      asyncStackTraces: process.env.NODE_ENV === 'development',
+    };
+  }
+
+  static async getCountryCode(dbPath: string): Promise<string> {
+    let countryCode = 'in';
+    const db = new DatabaseCore(dbPath);
+    await db.connect();
+
+    let query: { value: string }[] = [];
+    try {
+      query = (await db.knex!('SingleValue').where({
+        fieldname: 'countryCode',
+        parent: 'SystemSettings',
+      })) as { value: string }[];
+    } catch {
+      // Database not inialized and no countryCode passed
+    }
+
+    if (query.length > 0) {
+      countryCode = query[0].value;
+    }
+
+    await db.close();
+    return countryCode;
+  }
+
+  setSchemaMap(schemaMap: SchemaMap) {
+    this.schemaMap = schemaMap;
+  }
+
+  async connect() {
+    this.knex = knex(this.connectionParams);
+    await this.knex.raw('PRAGMA foreign_keys=ON');
+  }
+
+  async close() {
+    await this.knex!.destroy();
+  }
+
+  async migrate(config: MigrationConfig = {}) {
+    const { create, alter } = await this.#getCreateAlterList();
+    const hasSingleValueTable = !create.includes('SingleValue');
+    let singlesConfig: UpdateSinglesConfig = {
+      update: [],
+      updateNonExtant: [],
+    };
+
+    if (hasSingleValueTable) {
+      singlesConfig = await this.#getSinglesUpdateList();
+    }
+
+    const shouldMigrate = !!(
+      create.length ||
+      alter.length ||
+      singlesConfig.update.length ||
+      singlesConfig.updateNonExtant.length
+    );
+
+    if (!shouldMigrate) {
+      return;
+    }
+
+    await config.pre?.();
+    for (const schemaName of create) {
+      await this.#createTable(schemaName);
+    }
+
+    for (const config of alter) {
+      await this.#alterTable(config);
+    }
+
+    if (!hasSingleValueTable) {
+      singlesConfig = await this.#getSinglesUpdateList();
+    }
+
+    await this.#initializeSingles(singlesConfig);
+    await config.post?.();
+  }
+
+  async #getCreateAlterList() {
+    const create: string[] = [];
+    const alter: AlterConfig[] = [];
+
+    for (const [schemaName, schema] of Object.entries(this.schemaMap)) {
+      if (!schema || schema.isSingle) {
+        continue;
+      }
+
+      const exists = await this.#tableExists(schemaName);
+      if (!exists) {
+        create.push(schemaName);
+        continue;
+      }
+
+      const diff: ColumnDiff = await this.#getColumnDiff(schemaName);
+      const newForeignKeys: Field[] = await this.#getNewForeignKeys(schemaName);
+      if (diff.added.length || diff.removed.length || newForeignKeys.length) {
+        alter.push({
+          schemaName,
+          diff,
+          newForeignKeys,
+        });
+      }
+    }
+
+    return { create, alter };
+  }
+
+  async exists(schemaName: string, name?: string): Promise<boolean> {
+    const schema = this.schemaMap[schemaName] as Schema;
+    if (schema.isSingle) {
+      return this.#singleExists(schemaName);
+    }
+
+    let row = [];
+    try {
+      const qb = this.knex!(schemaName);
+      if (name !== undefined) {
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        qb.where({ name });
+      }
+      row = await qb.limit(1);
+    } catch (err) {
+      if (getDbError(err as Error) !== NotFoundError) {
+        throw err;
+      }
+    }
+    return row.length > 0;
+  }
+
+  async insert(
+    schemaName: string,
+    fieldValueMap: FieldValueMap
+  ): Promise<FieldValueMap> {
+    // insert parent
+    if (this.schemaMap[schemaName]!.isSingle) {
+      await this.#updateSingleValues(schemaName, fieldValueMap);
+    } else {
+      await this.#insertOne(schemaName, fieldValueMap);
+    }
+
+    // insert children
+    await this.#insertOrUpdateChildren(schemaName, fieldValueMap, false);
+    return fieldValueMap;
+  }
+
+  async get(
+    schemaName: string,
+    name = '',
+    fields?: string | string[]
+  ): Promise<FieldValueMap> {
+    const schema = this.schemaMap[schemaName] as Schema;
+    if (!schema.isSingle && !name) {
+      throw new ValueError('name is mandatory');
+    }
+
+    /**
+     * If schema is single return all the values
+     * of the single type schema, in this case field
+     * is ignored.
+     */
+    let fieldValueMap: FieldValueMap = {};
+    if (schema.isSingle) {
+      return await this.#getSingle(schemaName);
+    }
+
+    if (typeof fields === 'string') {
+      fields = [fields];
+    }
+
+    if (fields === undefined) {
+      fields = schema.fields.filter((f) => !f.computed).map((f) => f.fieldname);
+    }
+
+    /**
+     * Separate table fields and non table fields
+     */
+    const allTableFields: TargetField[] = this.#getTableFields(schemaName);
+    const allTableFieldNames: string[] = allTableFields.map((f) => f.fieldname);
+    const tableFields: TargetField[] = allTableFields.filter((f) =>
+      fields!.includes(f.fieldname)
+    );
+    const nonTableFieldNames: string[] = fields.filter(
+      (f) => !allTableFieldNames.includes(f)
+    );
+
+    /**
+     * If schema is not single then return specific fields
+     * if child fields are selected, all child fields are returned.
+     */
+    if (nonTableFieldNames.length) {
+      fieldValueMap =
+        (await this.#getOne(schemaName, name, nonTableFieldNames)) ?? {};
+    }
+
+    if (tableFields.length) {
+      await this.#loadChildren(name, fieldValueMap, tableFields);
+    }
+    return fieldValueMap;
+  }
+
+  async getAll(
+    schemaName: string,
+    options: GetAllOptions = {}
+  ): Promise<FieldValueMap[]> {
+    const schema = this.schemaMap[schemaName] as Schema;
+    if (schema === undefined) {
+      throw new NotFoundError(`schema ${schemaName} not found`);
+    }
+
+    const hasCreated = !!schema.fields.find((f) => f.fieldname === 'created');
+
+    const {
+      fields = ['name'],
+      filters,
+      offset,
+      limit,
+      groupBy,
+      orderBy = hasCreated ? 'created' : undefined,
+      order = 'desc',
+    } = options;
+
+    return (await this.#getQueryBuilder(
+      schemaName,
+      typeof fields === 'string' ? [fields] : fields,
+      filters ?? {},
+      {
+        offset,
+        limit,
+        groupBy,
+        orderBy,
+        order,
+      }
+    )) as FieldValueMap[];
+  }
+
+  async deleteAll(schemaName: string, filters: QueryFilter): Promise<number> {
+    const builder = this.knex!(schemaName);
+    this.#applyFiltersToBuilder(builder, filters);
+    return await builder.delete();
+  }
+
+  async getSingleValues(
+    ...fieldnames: ({ fieldname: string; parent?: string } | string)[]
+  ): Promise<SingleValue<RawValue>> {
+    const fieldnameList = fieldnames.map((fieldname) => {
+      if (typeof fieldname === 'string') {
+        return { fieldname };
+      }
+      return fieldname;
+    });
+
+    let builder = this.knex!('SingleValue');
+    builder = builder.where(fieldnameList[0]);
+
+    fieldnameList.slice(1).forEach(({ fieldname, parent }) => {
+      if (typeof parent === 'undefined') {
+        builder = builder.orWhere({ fieldname });
+      } else {
+        builder = builder.orWhere({ fieldname, parent });
+      }
+    });
+
+    let values: { fieldname: string; parent: string; value: RawValue }[] = [];
+    try {
+      values = await builder.select('fieldname', 'value', 'parent');
+    } catch (err) {
+      if (getDbError(err as Error) === NotFoundError) {
+        return [];
+      }
+
+      throw err;
+    }
+
+    return values;
+  }
+
+  async rename(schemaName: string, oldName: string, newName: string) {
+    /**
+     * Rename is expensive mostly won't allow it.
+     * TODO: rename all links
+     * TODO: rename in childtables
+     */
+    await this.knex!(schemaName)
+      .update({ name: newName })
+      .where('name', oldName);
+  }
+
+  async update(schemaName: string, fieldValueMap: FieldValueMap) {
+    // update parent
+    if (this.schemaMap[schemaName]!.isSingle) {
+      await this.#updateSingleValues(schemaName, fieldValueMap);
+    } else {
+      await this.#updateOne(schemaName, fieldValueMap);
+    }
+
+    // insert or update children
+    await this.#insertOrUpdateChildren(schemaName, fieldValueMap, true);
+  }
+
+  async delete(schemaName: string, name: string) {
+    const schema = this.schemaMap[schemaName] as Schema;
+    if (schema.isSingle) {
+      await this.#deleteSingle(schemaName, name);
+      return;
+    }
+
+    await this.#deleteOne(schemaName, name);
+
+    // delete children
+    const tableFields = this.#getTableFields(schemaName);
+
+    for (const field of tableFields) {
+      await this.#deleteChildren(field.target, name);
+    }
+  }
+
+  async #tableExists(schemaName: string): Promise<boolean> {
+    return await this.knex!.schema.hasTable(schemaName);
+  }
+
+  async #singleExists(singleSchemaName: string): Promise<boolean> {
+    const res = await this.knex!('SingleValue')
+      .count('parent as count')
+      .where('parent', singleSchemaName)
+      .first();
+    if (typeof res?.count === 'number') {
+      return res.count > 0;
+    }
+
+    return false;
+  }
+
+  async #dropColumns(schemaName: string, targetColumns: string[]) {
+    await this.knex!.schema.table(schemaName, (table) => {
+      table.dropColumns(...targetColumns);
+    });
+  }
+
+  async prestigeTheTable(schemaName: string, tableRows: FieldValueMap[]) {
+    // Alter table hacx for sqlite in case of schema change.
+    const tempName = `__${schemaName}`;
+
+    // Create replacement table
+    await this.knex!.schema.dropTableIfExists(tempName);
+    await this.knex!.raw('PRAGMA foreign_keys=OFF');
+    await this.#createTable(schemaName, tempName);
+
+    // Insert rows from source table into the replacement table
+    await this.knex!.batchInsert(tempName, tableRows, 200);
+
+    // Replace with the replacement table
+    await this.knex!.schema.dropTable(schemaName);
+    await this.knex!.schema.renameTable(tempName, schemaName);
+    await this.knex!.raw('PRAGMA foreign_keys=ON');
+  }
+
+  async #getTableColumns(schemaName: string): Promise<string[]> {
+    const info: FieldValueMap[] = await this.knex!.raw(
+      `PRAGMA table_info(${schemaName})`
+    );
+    return info.map((d) => d.name as string);
+  }
+
+  async truncate(tableNames?: string[]) {
+    if (tableNames === undefined) {
+      const q = (await this.knex!.raw(`
+        select name from sqlite_schema
+        where type='table'
+        and name not like 'sqlite_%'`)) as { name: string }[];
+      tableNames = q.map((i) => i.name);
+    }
+
+    for (const name of tableNames) {
+      await this.knex!(name).del();
+    }
+  }
+
+  async #getForeignKeys(schemaName: string): Promise<string[]> {
+    const foreignKeyList: FieldValueMap[] = await this.knex!.raw(
+      `PRAGMA foreign_key_list(${schemaName})`
+    );
+    return foreignKeyList.map((d) => d.from as string);
+  }
+
+  #getQueryBuilder(
+    schemaName: string,
+    fields: string[],
+    filters: QueryFilter,
+    options: GetQueryBuilderOptions
+  ): Knex.QueryBuilder {
+    /* eslint-disable @typescript-eslint/no-floating-promises */
+    const builder = this.knex!.select(fields).from(schemaName);
+
+    this.#applyFiltersToBuilder(builder, filters);
+
+    const { orderBy, groupBy, order } = options;
+    if (Array.isArray(orderBy)) {
+      builder.orderBy(orderBy.map((column) => ({ column, order })));
+    }
+
+    if (typeof orderBy === 'string') {
+      builder.orderBy(orderBy, order);
+    }
+
+    if (Array.isArray(groupBy)) {
+      builder.groupBy(...groupBy);
+    }
+
+    if (typeof groupBy === 'string') {
+      builder.groupBy(groupBy);
+    }
+
+    if (options.offset) {
+      builder.offset(options.offset);
+    }
+
+    if (options.limit) {
+      builder.limit(options.limit);
+    }
+
+    return builder;
+  }
+
+  #applyFiltersToBuilder(builder: Knex.QueryBuilder, filters: QueryFilter) {
+    // {"status": "Open"} => `status = "Open"`
+
+    // {"status": "Open", "name": ["like", "apple%"]}
+    // => `status="Open" and name like "apple%"
+
+    // {"date": [">=", "2017-09-09", "<=", "2017-11-01"]}
+    // => `date >= 2017-09-09 and date <= 2017-11-01`
+
+    const filtersArray = this.#getFiltersArray(filters);
+    for (let i = 0; i < filtersArray.length; i++) {
+      const filter = filtersArray[i];
+      const field = filter[0] as string;
+      const operator = filter[1];
+      const comparisonValue = filter[2];
+      const type = i === 0 ? 'where' : 'andWhere';
+
+      if (operator === '=') {
+        builder[type](field, comparisonValue);
+      } else if (
+        operator === 'in' &&
+        (comparisonValue as (string | null)[]).includes(null)
+      ) {
+        const nonNulls = (comparisonValue as (string | null)[]).filter(
+          Boolean
+        ) as string[];
+        builder[type](field, operator, nonNulls).orWhere(field, null);
+      } else {
+        builder[type](field, operator as string, comparisonValue as string);
+      }
+    }
+  }
+
+  #getFiltersArray(filters: QueryFilter) {
+    const filtersArray = [];
+    for (const field in filters) {
+      const value = filters[field];
+
+      let operator: string | number = '=';
+      let comparisonValue = value as string | number | (string | number)[];
+
+      if (Array.isArray(value)) {
+        operator = (value[0] as string).toLowerCase();
+        comparisonValue = value[1] as string | number | (string | number)[];
+
+        if (operator === 'includes') {
+          operator = 'like';
+        }
+
+        if (
+          operator === 'like' &&
+          typeof comparisonValue === 'string' &&
+          !comparisonValue.includes('%')
+        ) {
+          comparisonValue = `%${comparisonValue}%`;
+        }
+      }
+
+      filtersArray.push([field, operator, comparisonValue]);
+
+      if (Array.isArray(value) && value.length > 2) {
+        // multiple conditions
+        const operator = value[2];
+        const comparisonValue = value[3];
+        filtersArray.push([field, operator, comparisonValue]);
+      }
+    }
+
+    return filtersArray;
+  }
+
+  async #getColumnDiff(schemaName: string): Promise<ColumnDiff> {
+    const tableColumns = await this.#getTableColumns(schemaName);
+    const validFields = this.schemaMap[schemaName]!.fields.filter(
+      (f) => !f.computed
+    );
+    const diff: ColumnDiff = { added: [], removed: [] };
+
+    for (const field of validFields) {
+      const hasDbType = this.typeMap.hasOwnProperty(field.fieldtype);
+      if (!tableColumns.includes(field.fieldname) && hasDbType) {
+        diff.added.push(field);
+      }
+    }
+
+    const validFieldNames = validFields.map((field) => field.fieldname);
+    for (const column of tableColumns) {
+      if (!validFieldNames.includes(column)) {
+        diff.removed.push(column);
+      }
+    }
+
+    return diff;
+  }
+
+  async #getNewForeignKeys(schemaName: string): Promise<Field[]> {
+    const foreignKeys = await this.#getForeignKeys(schemaName);
+    const newForeignKeys: Field[] = [];
+    const schema = this.schemaMap[schemaName] as Schema;
+    for (const field of schema.fields) {
+      if (
+        field.fieldtype === 'Link' &&
+        !foreignKeys.includes(field.fieldname)
+      ) {
+        newForeignKeys.push(field);
+      }
+    }
+    return newForeignKeys;
+  }
+
+  #buildColumnForTable(table: Knex.AlterTableBuilder, field: Field) {
+    if (field.fieldtype === FieldTypeEnum.Table) {
+      // In case columnType is "Table"
+      // childTable links are handled using the childTable's "parent" field
+      return;
+    }
+
+    const columnType = this.typeMap[field.fieldtype];
+    if (!columnType) {
+      return;
+    }
+
+    const column = table[columnType](
+      field.fieldname
+    ) as Knex.SqlLiteColumnBuilder;
+
+    // primary key
+    if (field.fieldname === 'name') {
+      column.primary();
+    }
+
+    // iefault value
+    if (field.default !== undefined) {
+      column.defaultTo(field.default);
+    }
+
+    // required
+    if (field.required) {
+      column.notNullable();
+    }
+
+    // link
+    if (field.fieldtype === FieldTypeEnum.Link && field.target) {
+      const targetSchemaName = field.target;
+      const schema = this.schemaMap[targetSchemaName] as Schema;
+      table
+        .foreign(field.fieldname)
+        .references('name')
+        .inTable(schema.name)
+        .onUpdate('CASCADE')
+        .onDelete('RESTRICT');
+    }
+  }
+
+  async #alterTable({ schemaName, diff, newForeignKeys }: AlterConfig) {
+    await this.knex!.schema.table(schemaName, (table) => {
+      if (!diff.added.length) {
+        return;
+      }
+
+      for (const field of diff.added) {
+        this.#buildColumnForTable(table, field);
+      }
+    });
+
+    if (diff.removed.length) {
+      await this.#dropColumns(schemaName, diff.removed);
+    }
+
+    if (newForeignKeys.length) {
+      await this.#addForeignKeys(schemaName);
+    }
+  }
+
+  async #createTable(schemaName: string, tableName?: string) {
+    tableName ??= schemaName;
+    const fields = this.schemaMap[schemaName]!.fields.filter(
+      (f) => !f.computed
+    );
+    return await this.#runCreateTableQuery(tableName, fields);
+  }
+
+  #runCreateTableQuery(schemaName: string, fields: Field[]) {
+    return this.knex!.schema.createTable(schemaName, (table) => {
+      for (const field of fields) {
+        this.#buildColumnForTable(table, field);
+      }
+    });
+  }
+
+  async #getNonExtantSingleValues(singleSchemaName: string) {
+    const existingFields = (
+      (await this.knex!('SingleValue')
+        .where({ parent: singleSchemaName })
+        .select('fieldname')) as { fieldname: string }[]
+    ).map(({ fieldname }) => fieldname);
+
+    const nonExtant: NonExtantConfig['nonExtant'] = [];
+    const fields = this.schemaMap[singleSchemaName]?.fields ?? [];
+    for (const { fieldname, default: value } of fields) {
+      if (existingFields.includes(fieldname) || value === undefined) {
+        continue;
+      }
+
+      nonExtant.push({ fieldname, value });
+    }
+
+    return nonExtant;
+  }
+
+  async #deleteOne(schemaName: string, name: string) {
+    return await this.knex!(schemaName).where('name', name).delete();
+  }
+
+  async #deleteSingle(schemaName: string, fieldname: string) {
+    return await this.knex!('SingleValue')
+      .where({ parent: schemaName, fieldname })
+      .delete();
+  }
+
+  #deleteChildren(schemaName: string, parentName: string) {
+    return this.knex!(schemaName).where('parent', parentName).delete();
+  }
+
+  #runDeleteOtherChildren(
+    field: TargetField,
+    parentName: string,
+    added: string[]
+  ) {
+    // delete other children
+    return this.knex!(field.target)
+      .where('parent', parentName)
+      .andWhere('name', 'not in', added)
+      .delete();
+  }
+
+  #prepareChild(
+    parentSchemaName: string,
+    parentName: string,
+    child: FieldValueMap,
+    field: Field,
+    idx: number
+  ) {
+    if (!child.name) {
+      child.name ??= getRandomString();
+    }
+    child.parent = parentName;
+    child.parentSchemaName = parentSchemaName;
+    child.parentFieldname = field.fieldname;
+    child.idx ??= idx;
+  }
+
+  async #addForeignKeys(schemaName: string) {
+    const tableRows = await this.knex!.select().from(schemaName);
+    await this.prestigeTheTable(schemaName, tableRows);
+  }
+
+  async #loadChildren(
+    parentName: string,
+    fieldValueMap: FieldValueMap,
+    tableFields: TargetField[]
+  ) {
+    for (const field of tableFields) {
+      fieldValueMap[field.fieldname] = await this.getAll(field.target, {
+        fields: ['*'],
+        filters: { parent: parentName },
+        orderBy: 'idx',
+        order: 'asc',
+      });
+    }
+  }
+
+  async #getOne(schemaName: string, name: string, fields: string[]) {
+    const fieldValueMap = (await this.knex!.select(fields)
+      .from(schemaName)
+      .where('name', name)
+      .first()) as FieldValueMap;
+    return fieldValueMap;
+  }
+
+  async #getSingle(schemaName: string): Promise<FieldValueMap> {
+    const values = await this.getAll('SingleValue', {
+      fields: ['fieldname', 'value'],
+      filters: { parent: schemaName },
+      orderBy: 'fieldname',
+      order: 'asc',
+    });
+
+    const fieldValueMap = getValueMapFromList(
+      values,
+      'fieldname',
+      'value'
+    ) as FieldValueMap;
+    const tableFields: TargetField[] = this.#getTableFields(schemaName);
+    if (tableFields.length) {
+      await this.#loadChildren(schemaName, fieldValueMap, tableFields);
+    }
+
+    return fieldValueMap;
+  }
+
+  #insertOne(schemaName: string, fieldValueMap: FieldValueMap) {
+    if (!fieldValueMap.name) {
+      fieldValueMap.name = getRandomString();
+    }
+
+    // Column fields
+    const fields = this.schemaMap[schemaName]!.fields.filter(
+      (f) => f.fieldtype !== FieldTypeEnum.Table && !f.computed
+    );
+
+    const validMap: FieldValueMap = {};
+    for (const { fieldname } of fields) {
+      validMap[fieldname] = fieldValueMap[fieldname];
+    }
+
+    return this.knex!(schemaName).insert(validMap);
+  }
+
+  async #updateSingleValues(
+    singleSchemaName: string,
+    fieldValueMap: FieldValueMap
+  ) {
+    const fields = this.schemaMap[singleSchemaName]!.fields.filter(
+      (f) => !f.computed && f.fieldtype !== 'Table'
+    );
+    for (const field of fields) {
+      const value = fieldValueMap[field.fieldname] as RawValue | undefined;
+      if (value === undefined) {
+        continue;
+      }
+
+      await this.#updateSingleValue(singleSchemaName, field.fieldname, value);
+    }
+  }
+
+  async #updateSingleValue(
+    singleSchemaName: string,
+    fieldname: string,
+    value: RawValue
+  ) {
+    const updateKey = {
+      parent: singleSchemaName,
+      fieldname,
+    };
+
+    const names = (await this.knex!('SingleValue')
+      .select('name')
+      .where(updateKey)) as { name: string }[];
+
+    if (!names?.length) {
+      this.#insertSingleValue(singleSchemaName, fieldname, value);
+    } else {
+      return await this.knex!('SingleValue').where(updateKey).update({
+        value,
+        modifiedBy: SYSTEM,
+        modified: new Date().toISOString(),
+      });
+    }
+  }
+
+  async #insertSingleValue(
+    singleSchemaName: string,
+    fieldname: string,
+    value: RawValue
+  ) {
+    const updateMap = getDefaultMetaFieldValueMap();
+    const fieldValueMap: FieldValueMap = Object.assign({}, updateMap, {
+      parent: singleSchemaName,
+      fieldname,
+      value,
+      name: getRandomString(),
+    });
+    return await this.knex!('SingleValue').insert(fieldValueMap);
+  }
+
+  async #getSinglesUpdateList() {
+    const update: string[] = [];
+    const updateNonExtant: NonExtantConfig[] = [];
+    for (const [schemaName, schema] of Object.entries(this.schemaMap)) {
+      if (!schema || !schema.isSingle) {
+        continue;
+      }
+
+      const exists = await this.#singleExists(schemaName);
+      if (!exists && schema.fields.some((f) => f.default !== undefined)) {
+        update.push(schemaName);
+      }
+
+      if (!exists) {
+        continue;
+      }
+
+      const nonExtant = await this.#getNonExtantSingleValues(schemaName);
+      if (nonExtant.length) {
+        updateNonExtant.push({
+          schemaName,
+          nonExtant,
+        });
+      }
+    }
+
+    return { update, updateNonExtant };
+  }
+
+  async #initializeSingles({ update, updateNonExtant }: UpdateSinglesConfig) {
+    for (const config of updateNonExtant) {
+      await this.#updateNonExtantSingleValues(config);
+    }
+
+    for (const schemaName of update) {
+      const fields = this.schemaMap[schemaName]!.fields;
+      const defaultValues: FieldValueMap = fields.reduce((acc, f) => {
+        if (f.default !== undefined) {
+          acc[f.fieldname] = f.default;
+        }
+
+        return acc;
+      }, {} as FieldValueMap);
+
+      await this.#updateSingleValues(schemaName, defaultValues);
+    }
+  }
+
+  async #updateNonExtantSingleValues({
+    schemaName,
+    nonExtant,
+  }: NonExtantConfig) {
+    for (const { fieldname, value } of nonExtant) {
+      await this.#updateSingleValue(schemaName, fieldname, value);
+    }
+  }
+
+  async #updateOne(schemaName: string, fieldValueMap: FieldValueMap) {
+    const updateMap = { ...fieldValueMap };
+    delete updateMap.name;
+    const schema = this.schemaMap[schemaName] as Schema;
+    for (const { fieldname, fieldtype, computed } of schema.fields) {
+      if (fieldtype !== FieldTypeEnum.Table && !computed) {
+        continue;
+      }
+
+      delete updateMap[fieldname];
+    }
+
+    if (Object.keys(updateMap).length === 0) {
+      return;
+    }
+
+    return await this.knex!(schemaName)
+      .where('name', fieldValueMap.name as string)
+      .update(updateMap);
+  }
+
+  async #insertOrUpdateChildren(
+    schemaName: string,
+    fieldValueMap: FieldValueMap,
+    isUpdate: boolean
+  ) {
+    let parentName = fieldValueMap.name as string;
+    if (this.schemaMap[schemaName]?.isSingle) {
+      parentName = schemaName;
+    }
+
+    const tableFields = this.#getTableFields(schemaName);
+
+    for (const field of tableFields) {
+      const added: string[] = [];
+
+      const tableFieldValue = fieldValueMap[field.fieldname] as
+        | FieldValueMap[]
+        | undefined
+        | null;
+      if (getIsNullOrUndef(tableFieldValue)) {
+        continue;
+      }
+
+      for (const child of tableFieldValue) {
+        this.#prepareChild(schemaName, parentName, child, field, added.length);
+
+        if (
+          isUpdate &&
+          (await this.exists(field.target, child.name as string))
+        ) {
+          await this.#updateOne(field.target, child);
+        } else {
+          await this.#insertOne(field.target, child);
+        }
+
+        added.push(child.name as string);
+      }
+
+      if (isUpdate) {
+        await this.#runDeleteOtherChildren(field, parentName, added);
+      }
+    }
+  }
+
+  #getTableFields(schemaName: string): TargetField[] {
+    return this.schemaMap[schemaName]!.fields.filter(
+      (f) => f.fieldtype === FieldTypeEnum.Table
+    ) as TargetField[];
+  }
+}
+
+======================================================================
+FILE: backend\database\manager.ts
+======================================================================
+import BetterSQLite3 from 'better-sqlite3';
+import fs from 'fs-extra';
+import { DatabaseError } from 'fyo/utils/errors';
+import path from 'path';
+import { DatabaseDemuxBase, DatabaseMethod } from 'utils/db/types';
+import { getMapFromList } from 'utils/index';
+import { Version } from 'utils/version';
+import { getSchemas } from '../../schemas';
+import { databaseMethodSet, unlinkIfExists } from '../helpers';
+import patches from '../patches';
+import { BespokeQueries } from './bespoke';
+import DatabaseCore from './core';
+import { runPatches } from './runPatch';
+import { BespokeFunction, Patch, RawCustomField } from './types';
+
+export class DatabaseManager extends DatabaseDemuxBase {
+  db?: DatabaseCore;
+  rawCustomFields: RawCustomField[] = [];
+
+  get #isInitialized(): boolean {
+    return this.db !== undefined && this.db.knex !== undefined;
+  }
+
+  getSchemaMap() {
+    if (this.#isInitialized) {
+      return this.db?.schemaMap ?? getSchemas('-', this.rawCustomFields);
+    }
+
+    return getSchemas('-', this.rawCustomFields);
+  }
+
+  async createNewDatabase(dbPath: string, countryCode: string) {
+    await unlinkIfExists(dbPath);
+    return await this.connectToDatabase(dbPath, countryCode);
+  }
+
+  async connectToDatabase(dbPath: string, countryCode?: string) {
+    countryCode = await this._connect(dbPath, countryCode);
+    await this.#migrate();
+    return countryCode;
+  }
+
+  async _connect(dbPath: string, countryCode?: string) {
+    countryCode ??= await DatabaseCore.getCountryCode(dbPath);
+    this.db = new DatabaseCore(dbPath);
+    await this.db.connect();
+    await this.setRawCustomFields();
+    const schemaMap = getSchemas(countryCode, this.rawCustomFields);
+    this.db.setSchemaMap(schemaMap);
+    return countryCode;
+  }
+
+  async setRawCustomFields() {
+    try {
+      this.rawCustomFields = (await this.db?.knex?.(
+        'CustomField'
+      )) as RawCustomField[];
+    } catch {}
+  }
+
+  async #migrate(): Promise<void> {
+    if (!this.#isInitialized) {
+      return;
+    }
+
+    const isFirstRun = await this.#getIsFirstRun();
+    if (isFirstRun) {
+      await this.db!.migrate();
+    }
+
+    await this.#executeMigration();
+  }
+
+  async #executeMigration() {
+    const version = await this.#getAppVersion();
+    const patches = await this.#getPatchesToExecute(version);
+
+    const hasPatches = !!patches.pre.length || !!patches.post.length;
+    if (hasPatches) {
+      await this.#createBackup();
+    }
+
+    await runPatches(patches.pre, this, version);
+    await this.db!.migrate({
+      pre: async () => {
+        if (hasPatches) {
+          return;
+        }
+
+        await this.#createBackup();
+      },
+    });
+    await runPatches(patches.post, this, version);
+  }
+
+  async #getPatchesToExecute(
+    version: string
+  ): Promise<{ pre: Patch[]; post: Patch[] }> {
+    if (this.db === undefined) {
+      return { pre: [], post: [] };
+    }
+
+    const query = (await this.db.knex!('PatchRun').select()) as {
+      name: string;
+      version?: string;
+      failed?: boolean;
+    }[];
+
+    const runPatchesMap = getMapFromList(query, 'name');
+    /**
+     * A patch is run only if:
+     * - it hasn't run and was added in a future version
+     *    i.e. app version is before patch added version
+     * - it ran but failed in some other version (i.e fixed)
+     */
+    const filtered = patches
+      .filter((p) => {
+        const exec = runPatchesMap[p.name];
+        if (!exec && Version.lte(version, p.version)) {
+          return true;
+        }
+
+        if (exec?.failed && exec?.version !== version) {
+          return true;
+        }
+
+        return false;
+      })
+      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+
+    return {
+      pre: filtered.filter((p) => p.patch.beforeMigrate),
+      post: filtered.filter((p) => !p.patch.beforeMigrate),
+    };
+  }
+
+  async call(method: DatabaseMethod, ...args: unknown[]) {
+    if (!this.#isInitialized) {
+      return;
+    }
+
+    if (!databaseMethodSet.has(method)) {
+      return;
+    }
+
+    // @ts-ignore
+    const response = await this.db[method](...args);
+    if (method === 'close') {
+      delete this.db;
+    }
+
+    return response;
+  }
+
+  async callBespoke(method: string, ...args: unknown[]): Promise<unknown> {
+    if (!this.#isInitialized) {
+      return;
+    }
+
+    if (!BespokeQueries.hasOwnProperty(method)) {
+      throw new DatabaseError(`invalid bespoke db function ${method}`);
+    }
+
+    const queryFunction: BespokeFunction =
+      BespokeQueries[method as keyof BespokeFunction];
+    return await queryFunction(this.db!, ...args);
+  }
+
+  async #getIsFirstRun(): Promise<boolean> {
+    const knex = this.db?.knex;
+    if (!knex) {
+      return true;
+    }
+
+    const query = await knex('sqlite_master').where({
+      type: 'table',
+      name: 'PatchRun',
+    });
+    return !query.length;
+  }
+
+  async #createBackup() {
+    const { dbPath } = this.db ?? {};
+    if (!dbPath || process.env.IS_TEST) {
+      return;
+    }
+
+    const backupPath = await this.#getBackupFilePath();
+    if (!backupPath) {
+      return;
+    }
+
+    const db = this.getDriver();
+    await db?.backup(backupPath).then(() => db.close());
+  }
+
+  async #getBackupFilePath() {
+    const { dbPath } = this.db ?? {};
+    if (dbPath === ':memory:' || !dbPath) {
+      return null;
+    }
+
+    let fileName = path.parse(dbPath).name;
+    if (fileName.endsWith('.books')) {
+      fileName = fileName.slice(0, -6);
+    }
+
+    const backupFolder = path.join(path.dirname(dbPath), 'backups');
+    const date = new Date().toISOString().split('T')[0];
+    const version = await this.#getAppVersion();
+    const backupFile = `${fileName}_${version}_${date}.books.db`;
+    fs.ensureDirSync(backupFolder);
+    return path.join(backupFolder, backupFile);
+  }
+
+  async #getAppVersion(): Promise<string> {
+    const knex = this.db?.knex;
+    if (!knex) {
+      return '0.0.0';
+    }
+
+    const query = await knex('SingleValue')
+      .select('value')
+      .where({ fieldname: 'version', parent: 'SystemSettings' });
+    const value = (query[0] as undefined | { value: string })?.value;
+    return value || '0.0.0';
+  }
+
+  getDriver() {
+    const { dbPath } = this.db ?? {};
+    if (!dbPath) {
+      return null;
+    }
+
+    return BetterSQLite3(dbPath, { readonly: true });
+  }
+}
+
+export default new DatabaseManager();
+
+======================================================================
+FILE: backend\database\runPatch.ts
+======================================================================
+import { emitMainProcessError, getDefaultMetaFieldValueMap } from '../helpers';
+import { DatabaseManager } from './manager';
+import { FieldValueMap, Patch } from './types';
+
+export async function runPatches(
+  patches: Patch[],
+  dm: DatabaseManager,
+  version: string
+) {
+  const list: { name: string; success: boolean }[] = [];
+  for (const patch of patches) {
+    const success = await runPatch(patch, dm, version);
+    list.push({ name: patch.name, success });
+  }
+  return list;
+}
+
+async function runPatch(
+  patch: Patch,
+  dm: DatabaseManager,
+  version: string
+): Promise<boolean> {
+  let failed = false;
+  try {
+    await patch.patch.execute(dm);
+  } catch (error) {
+    failed = true;
+    if (error instanceof Error) {
+      error.message = `Patch Failed: ${patch.name}\n${error.message}`;
+      emitMainProcessError(error, { patchName: patch.name, notifyUser: false });
+    }
+  }
+
+  await makeEntry(patch.name, version, failed, dm);
+  return true;
+}
+
+async function makeEntry(
+  patchName: string,
+  version: string,
+  failed: boolean,
+  dm: DatabaseManager
+) {
+  const defaultFieldValueMap = getDefaultMetaFieldValueMap() as FieldValueMap;
+
+  defaultFieldValueMap.name = patchName;
+  defaultFieldValueMap.failed = failed;
+  defaultFieldValueMap.version = version;
+
+  try {
+    await dm.db!.insert('PatchRun', defaultFieldValueMap);
+  } catch {
+    /**
+     * Error is thrown if PatchRun table hasn't been migrated.
+     * In this case, PatchRun will migrated post pre-migration-patches
+     * are run and rerun the patch.
+     */
+    return;
+  }
+}
+
+======================================================================
+FILE: backend\database\types.ts
+======================================================================
+import type { Field, FieldType, RawValue } from '../../schemas/types';
+import type DatabaseCore from './core';
+import type { DatabaseManager } from './manager';
+
+export interface GetQueryBuilderOptions {
+  offset?: number;
+  limit?: number;
+  groupBy?: string | string[];
+  orderBy?: string | string[];
+  order?: 'desc' | 'asc';
+}
+
+export type ColumnDiff = { added: Field[]; removed: string[] };
+export type FieldValueMap = Record<
+  string,
+  RawValue | undefined | FieldValueMap[]
+>;
+
+export type AlterConfig = {
+  schemaName: string;
+  diff: ColumnDiff;
+  newForeignKeys: Field[];
+};
+
+export type NonExtantConfig = {
+  schemaName: string;
+  nonExtant: {
+    fieldname: string;
+    value: RawValue;
+  }[];
+};
+
+export type UpdateSinglesConfig = {
+  update: string[];
+  updateNonExtant: NonExtantConfig[];
+};
+
+export type MigrationConfig = {
+  pre?: () => Promise<void> | void;
+  post?: () => Promise<void> | void;
+};
+
+export interface Patch {
+  name: string;
+  version: string;
+  patch: {
+    execute: (dm: DatabaseManager) => Promise<void>;
+    beforeMigrate?: boolean;
+  };
+  priority?: number;
+}
+
+export type KnexColumnType =
+  | 'text'
+  | 'integer'
+  | 'float'
+  | 'boolean'
+  | 'date'
+  | 'datetime'
+  | 'time'
+  | 'binary';
+
+// Returned by pragma table_info
+export interface SqliteTableInfo {
+  pk: number;
+  cid: number;
+  name: string;
+  type: string;
+  notnull: number; // 0 | 1
+  dflt_value: string | null;
+}
+
+export type BespokeFunction = (
+  db: DatabaseCore,
+  ...args: unknown[]
+) => Promise<unknown>;
+
+export type SingleValue<T> = {
+  fieldname: string;
+  parent: string;
+  value: T;
+}[];
+
+export type RawCustomField = {
+  parent: string;
+  label: string;
+  fieldname: string;
+  fieldtype: FieldType;
+  isRequired?: boolean;
+  section?: string;
+  tab?: string;
+  options?: string;
+  target?: string;
+  references?: string;
+  default?: string;
+};
+
+======================================================================
+FILE: backend\database\tests\helpers.ts
+======================================================================
+import assert from 'assert';
+import { cloneDeep } from 'lodash';
+import {
+  addMetaFields,
+  cleanSchemas,
+  getAbstractCombinedSchemas,
+} from '../../../schemas';
+import SingleValue from '../../../schemas/core/SingleValue.json';
+import { SchemaMap, SchemaStub, SchemaStubMap } from '../../../schemas/types';
+
+const Customer = {
+  name: 'Customer',
+  label: 'Customer',
+  fields: [
+    {
+      fieldname: 'name',
+      label: 'Name',
+      fieldtype: 'Data',
+      required: true,
+    },
+    {
+      fieldname: 'email',
+      label: 'Email',
+      fieldtype: 'Data',
+      placeholder: 'john@thoe.com',
+    },
+    {
+      fieldname: 'phone',
+      label: 'Phone',
+      fieldtype: 'Data',
+      placeholder: '9999999999',
+    },
+  ],
+  quickEditFields: ['email'],
+  keywordFields: ['name'],
+};
+
+const SalesInvoiceItem = {
+  name: 'SalesInvoiceItem',
+  label: 'Sales Invoice Item',
+  isChild: true,
+  fields: [
+    {
+      fieldname: 'item',
+      label: 'Item',
+      fieldtype: 'Data',
+      required: true,
+    },
+    {
+      fieldname: 'quantity',
+      label: 'Quantity',
+      fieldtype: 'Float',
+      required: true,
+      default: 1,
+    },
+    {
+      fieldname: 'rate',
+      label: 'Rate',
+      fieldtype: 'Float',
+      required: true,
+    },
+    {
+      fieldname: 'amount',
+      label: 'Amount',
+      fieldtype: 'Float',
+      readOnly: true,
+    },
+  ],
+  tableFields: ['item', 'quantity', 'rate', 'amount'],
+};
+
+const SalesInvoice = {
+  name: 'SalesInvoice',
+  label: 'Sales Invoice',
+  isSingle: false,
+  isChild: false,
+  isSubmittable: true,
+  keywordFields: ['name', 'customer'],
+  fields: [
+    {
+      label: 'Invoice No',
+      fieldname: 'name',
+      fieldtype: 'Data',
+      required: true,
+      readOnly: true,
+    },
+    {
+      fieldname: 'date',
+      label: 'Date',
+      fieldtype: 'Date',
+    },
+    {
+      fieldname: 'customer',
+      label: 'Customer',
+      fieldtype: 'Link',
+      target: 'Customer',
+      required: true,
+    },
+    {
+      fieldname: 'account',
+      label: 'Account',
+      fieldtype: 'Data',
+      required: true,
+    },
+    {
+      fieldname: 'items',
+      label: 'Items',
+      fieldtype: 'Table',
+      target: 'SalesInvoiceItem',
+      required: true,
+    },
+    {
+      fieldname: 'grandTotal',
+      label: 'Grand Total',
+      fieldtype: 'Currency',
+      readOnly: true,
+    },
+  ],
+};
+
+const SystemSettings = {
+  name: 'SystemSettings',
+  label: 'System Settings',
+  isSingle: true,
+  isChild: false,
+  fields: [
+    {
+      fieldname: 'dateFormat',
+      label: 'Date Format',
+      fieldtype: 'Select',
+      options: [
+        {
+          label: '23/03/2022',
+          value: 'dd/MM/yyyy',
+        },
+        {
+          label: '03/23/2022',
+          value: 'MM/dd/yyyy',
+        },
+      ],
+      default: 'dd/MM/yyyy',
+      required: true,
+    },
+    {
+      fieldname: 'locale',
+      label: 'Locale',
+      fieldtype: 'Data',
+      default: 'en-IN',
+    },
+  ],
+  quickEditFields: ['locale', 'dateFormat'],
+  keywordFields: [],
+};
+
+export function getBuiltTestSchemaMap(): SchemaMap {
+  const testSchemaMap: SchemaStubMap = {
+    SingleValue: SingleValue as SchemaStub,
+    Customer: Customer as SchemaStub,
+    SalesInvoice: SalesInvoice as SchemaStub,
+    SalesInvoiceItem: SalesInvoiceItem as SchemaStub,
+    SystemSettings: SystemSettings as SchemaStub,
+  };
+
+  const schemaMapClone = cloneDeep(testSchemaMap);
+  const abstractCombined = getAbstractCombinedSchemas(schemaMapClone);
+  const cleanedSchemas = cleanSchemas(abstractCombined);
+  return addMetaFields(cleanedSchemas);
+}
+
+export function getBaseMeta() {
+  return {
+    createdBy: 'Administrator',
+    modifiedBy: 'Administrator',
+    created: new Date().toISOString(),
+    modified: new Date().toISOString(),
+  };
+}
+
+export async function assertThrows(
+  func: () => Promise<unknown>,
+  message?: string
+) {
+  let threw = true;
+  try {
+    await func();
+    threw = false;
+  } catch {
+  } finally {
+    if (!threw) {
+      throw new assert.AssertionError({
+        message: `Missing expected exception${message ? `: ${message}` : ''}`,
+      });
+    }
+  }
+}
+
+export async function assertDoesNotThrow(
+  func: () => Promise<unknown>,
+  message?: string
+) {
+  try {
+    await func();
+  } catch (err) {
+    throw new assert.AssertionError({
+      message: `Got unwanted exception${
+        message ? `: ${message}` : ''
+      }\nError: ${(err as Error).message}\n${(err as Error).stack ?? ''}`,
+    });
+  }
+}
+
+export type BaseMetaKey = 'created' | 'modified' | 'createdBy' | 'modifiedBy';
+
+======================================================================
+FILE: backend\patches\addUOMs.ts
+======================================================================
+import { ModelNameEnum } from '../../models/types';
+import { DatabaseManager } from '../database/manager';
+import { getDefaultMetaFieldValueMap } from '../helpers';
+
+const defaultUOMs = [
+  {
+    name: `Unit`,
+    isWhole: true,
+  },
+  {
+    name: `Kg`,
+    isWhole: false,
+  },
+  {
+    name: `Gram`,
+    isWhole: false,
+  },
+  {
+    name: `Meter`,
+    isWhole: false,
+  },
+  {
+    name: `Hour`,
+    isWhole: false,
+  },
+  {
+    name: `Day`,
+    isWhole: false,
+  },
+];
+
+async function execute(dm: DatabaseManager) {
+  for (const uom of defaultUOMs) {
+    const defaults = getDefaultMetaFieldValueMap();
+    await dm.db?.insert(ModelNameEnum.UOM, { ...uom, ...defaults });
+  }
+}
+
+export default { execute };
+
+======================================================================
+FILE: backend\patches\createInventoryNumberSeries.ts
+======================================================================
+import { getDefaultMetaFieldValueMap } from '../../backend/helpers';
+import { DatabaseManager } from '../database/manager';
+
+async function execute(dm: DatabaseManager) {
+  const s = (await dm.db?.getAll('SingleValue', {
+    fields: ['value'],
+    filters: { fieldname: 'setupComplete' },
+  })) as { value: string }[];
+
+  if (!Number(s?.[0]?.value ?? '0')) {
+    return;
+  }
+
+  const names: Record<string, string> = {
+    StockMovement: 'SMOV-',
+    PurchaseReceipt: 'PREC-',
+    Shipment: 'SHPM-',
+  };
+
+  for (const referenceType in names) {
+    const name = names[referenceType];
+    await createNumberSeries(name, referenceType, dm);
+  }
+}
+
+async function createNumberSeries(
+  name: string,
+  referenceType: string,
+  dm: DatabaseManager
+) {
+  const exists = await dm.db?.exists('NumberSeries', name);
+  if (exists) {
+    return;
+  }
+
+  await dm.db?.insert('NumberSeries', {
+    name,
+    start: 1001,
+    padZeros: 4,
+    current: 0,
+    referenceType,
+    ...getDefaultMetaFieldValueMap(),
+  });
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\createPaymentMethods.ts
+======================================================================
+import { ModelNameEnum } from 'models/types';
+import { DatabaseManager } from '../database/manager';
+import { AccountTypeEnum } from 'models/baseModels/Account/types';
+import { getDefaultMetaFieldValueMap } from 'backend/helpers';
+
+type AccountTypeMap = Record<AccountTypeEnum, string[] | undefined>;
+
+async function execute(dm: DatabaseManager) {
+  const accounts = (await dm.db?.getAll(ModelNameEnum.Account, {
+    fields: ['name', 'accountType'],
+    filters: {
+      accountType: [
+        'in',
+        [
+          AccountTypeEnum.Bank,
+          AccountTypeEnum.Cash,
+          AccountTypeEnum.Payable,
+          AccountTypeEnum.Receivable,
+        ],
+      ],
+    },
+  })) as { name: string; accountType: AccountTypeEnum }[];
+
+  const accountsMap = accounts.reduce((acc, ac) => {
+    acc[ac.accountType] ??= [];
+    acc[ac.accountType]!.push(ac.name);
+    return acc;
+  }, {} as AccountTypeMap);
+
+  const defaults = getDefaultMetaFieldValueMap();
+
+  const paymentMethods = [
+    {
+      name: 'Cash',
+      type: 'Cash',
+      account: accountsMap[AccountTypeEnum.Cash]?.[0],
+      ...defaults,
+    },
+    {
+      name: 'Bank',
+      type: 'Bank',
+      account: accountsMap[AccountTypeEnum.Bank]?.[0],
+      ...defaults,
+    },
+    {
+      name: 'Transfer',
+      type: 'Bank',
+      account: accountsMap[AccountTypeEnum.Bank]?.[0],
+      ...defaults,
+    },
+  ];
+
+  for (const paymentMethod of paymentMethods) {
+    await dm.db?.insert(ModelNameEnum.PaymentMethod, paymentMethod);
+  }
+}
+export default { execute };
+
+======================================================================
+FILE: backend\patches\fixItemHSNField.ts
+======================================================================
+import { DatabaseManager } from '../database/manager';
+
+async function execute(dm: DatabaseManager) {
+  const knexSchema = dm.db?.knex?.schema;
+
+  await knexSchema?.alterTable('Item', (table) => {
+    table.text('hsnCode').alter();
+  });
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\fixRoundOffAccount.ts
+======================================================================
+import { ModelNameEnum } from '../../models/types';
+import { DatabaseManager } from '../database/manager';
+
+const FIELDNAME = 'roundOffAccount';
+
+async function execute(dm: DatabaseManager) {
+  const accounts = await dm.db!.getSingleValues(FIELDNAME);
+  if (!accounts.length) {
+    await testAndSetRoundOffAccount(dm);
+  }
+
+  await dm.db!.delete(ModelNameEnum.AccountingSettings, FIELDNAME);
+
+  let isSet = false;
+  for (const { parent, value } of accounts) {
+    if (parent !== ModelNameEnum.AccountingSettings) {
+      continue;
+    }
+
+    isSet = await setRoundOffAccountIfExists(value as string, dm);
+    if (isSet) {
+      break;
+    }
+  }
+
+  if (!isSet) {
+    await testAndSetRoundOffAccount(dm);
+  }
+}
+
+async function testAndSetRoundOffAccount(dm: DatabaseManager) {
+  const isSet = await setRoundOffAccountIfExists('Round Off', dm);
+  if (!isSet) {
+    await setRoundOffAccountIfExists('Rounded Off', dm);
+  }
+
+  return;
+}
+
+async function setRoundOffAccountIfExists(
+  roundOffAccount: string,
+  dm: DatabaseManager
+) {
+  const exists = await dm.db!.exists(ModelNameEnum.Account, roundOffAccount);
+  if (!exists) {
+    return false;
+  }
+
+  await dm.db!.insert(ModelNameEnum.AccountingSettings, {
+    roundOffAccount,
+  });
+  return true;
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\index.ts
+======================================================================
+import { Patch } from '../database/types';
+import addUOMs from './addUOMs';
+import createInventoryNumberSeries from './createInventoryNumberSeries';
+import fixRoundOffAccount from './fixRoundOffAccount';
+import testPatch from './testPatch';
+import updateSchemas from './updateSchemas';
+import setPaymentReferenceType from './setPaymentReferenceType';
+import fixLedgerDateTime from './v0_21_0/fixLedgerDateTime';
+import fixItemHSNField from './fixItemHSNField';
+import createPaymentMethods from './createPaymentMethods';
+
+export default [
+  { name: 'testPatch', version: '0.5.0-beta.0', patch: testPatch },
+  {
+    name: 'updateSchemas',
+    version: '0.5.0-beta.0',
+    patch: updateSchemas,
+    priority: 100,
+  },
+  {
+    name: 'addUOMs',
+    version: '0.6.0-beta.0',
+    patch: addUOMs,
+  },
+  {
+    name: 'fixRoundOffAccount',
+    version: '0.6.3-beta.0',
+    patch: fixRoundOffAccount,
+  },
+  {
+    name: 'createInventoryNumberSeries',
+    version: '0.6.6-beta.0',
+    patch: createInventoryNumberSeries,
+  },
+  {
+    name: 'setPaymentReferenceType',
+    version: '0.20.1',
+    patch: setPaymentReferenceType,
+  },
+  {
+    name: 'fixLedgerDateTime',
+    version: '0.21.2',
+    patch: fixLedgerDateTime,
+  },
+  { name: 'fixItemHSNField', version: '0.24.0', patch: fixItemHSNField },
+  {
+    name: 'createPaymentMethods',
+    version: '0.25.1',
+    patch: createPaymentMethods,
+  },
+] as Patch[];
+
+======================================================================
+FILE: backend\patches\setPaymentReferenceType.ts
+======================================================================
+import { DatabaseManager } from '../database/manager';
+
+async function execute(dm: DatabaseManager) {
+  await dm.db!.knex!('Payment')
+    .where({ referenceType: null, paymentType: 'Pay' })
+    .update({ referenceType: 'PurchaseInvoice' });
+  await dm.db!.knex!('Payment')
+    .where({ referenceType: null, paymentType: 'Receive' })
+    .update({ referenceType: 'SalesInvoice' });
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\testPatch.ts
+======================================================================
+import { DatabaseManager } from '../database/manager';
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function execute(dm: DatabaseManager) {
+  /**
+   * Execute function will receive the DatabaseManager which is to be used
+   * to apply database patches.
+   */
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\updateSchemas.ts
+======================================================================
+import fs from 'fs/promises';
+import { RawValueMap } from 'fyo/core/types';
+import { Knex } from 'knex';
+import path from 'path';
+import { changeKeys, deleteKeys, getIsNullOrUndef, invertMap } from 'utils';
+import { getCountryCodeFromCountry } from 'utils/misc';
+import { Version } from 'utils/version';
+import { ModelNameEnum } from '../../models/types';
+import { FieldTypeEnum, Schema, SchemaMap } from '../../schemas/types';
+import { DatabaseManager } from '../database/manager';
+
+const ignoreColumns = ['keywords'];
+const columnMap = { creation: 'created', owner: 'createdBy' };
+const childTableColumnMap = {
+  parenttype: 'parentSchemaName',
+  parentfield: 'parentFieldname',
+};
+
+const defaultNumberSeriesMap = {
+  [ModelNameEnum.Payment]: 'PAY-',
+  [ModelNameEnum.JournalEntry]: 'JV-',
+  [ModelNameEnum.SalesInvoice]: 'SINV-',
+  [ModelNameEnum.PurchaseInvoice]: 'PINV-',
+  [ModelNameEnum.SalesQuote]: 'SQUOT-',
+} as Record<ModelNameEnum, string>;
+
+async function execute(dm: DatabaseManager) {
+  if (dm.db?.dbPath === ':memory:') {
+    return;
+  }
+
+  const sourceKnex = dm.db!.knex!;
+  const version = (
+    (await sourceKnex('SingleValue')
+      .select('value')
+      .where({ fieldname: 'version' })) as { value: string }[]
+  )?.[0]?.value;
+
+  /**
+   * Versions after this should have the new schemas
+   */
+
+  if (version && Version.gt(version, '0.4.3-beta.0')) {
+    return;
+  }
+
+  /**
+   * Initialize a different db to copy all the updated
+   * data into.
+   */
+  const countryCode = await getCountryCode(sourceKnex);
+  const destDm = await getDestinationDM(dm.db!.dbPath, countryCode);
+
+  /**
+   * Copy data from all the relevant tables
+   * the other tables will be empty cause unused.
+   */
+  try {
+    await copyData(sourceKnex, destDm);
+  } catch (err) {
+    const destPath = destDm.db!.dbPath;
+    await destDm.db!.close();
+    await fs.unlink(destPath);
+    throw err;
+  }
+
+  /**
+   * Version will update when migration completes, this
+   * is set to prevent this patch from running again.
+   */
+  await destDm.db!.update(ModelNameEnum.SystemSettings, {
+    version: '0.5.0-beta.0',
+  });
+
+  /**
+   * Replace the database with the new one.
+   */
+  await replaceDatabaseCore(dm, destDm);
+}
+
+async function replaceDatabaseCore(
+  dm: DatabaseManager,
+  destDm: DatabaseManager
+) {
+  const newDbPath = destDm.db!.dbPath; // new db with new schema
+  const oldDbPath = dm.db!.dbPath; // old db to be replaced
+
+  await dm.db!.close();
+  await destDm.db!.close();
+  await fs.unlink(oldDbPath);
+  await fs.rename(newDbPath, oldDbPath);
+  await dm._connect(oldDbPath);
+}
+
+async function copyData(sourceKnex: Knex, destDm: DatabaseManager) {
+  const destKnex = destDm.db!.knex!;
+  const schemaMap = destDm.getSchemaMap();
+  await destKnex.raw('PRAGMA foreign_keys=OFF');
+  await copySingleValues(sourceKnex, destKnex, schemaMap);
+  await copyParty(sourceKnex, destKnex, schemaMap[ModelNameEnum.Party]!);
+  await copyItem(sourceKnex, destKnex, schemaMap[ModelNameEnum.Item]!);
+  await copyChildTables(sourceKnex, destKnex, schemaMap);
+  await copyOtherTables(sourceKnex, destKnex, schemaMap);
+  await copyTransactionalTables(sourceKnex, destKnex, schemaMap);
+  await copyLedgerEntries(
+    sourceKnex,
+    destKnex,
+    schemaMap[ModelNameEnum.AccountingLedgerEntry]!
+  );
+  await copyNumberSeries(
+    sourceKnex,
+    destKnex,
+    schemaMap[ModelNameEnum.NumberSeries]!
+  );
+  await destKnex.raw('PRAGMA foreign_keys=ON');
+}
+
+async function copyNumberSeries(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schema: Schema
+) {
+  const values = (await sourceKnex(
+    ModelNameEnum.NumberSeries
+  )) as RawValueMap[];
+
+  const refMap = invertMap(defaultNumberSeriesMap);
+
+  for (const value of values) {
+    if (value.referenceType) {
+      continue;
+    }
+
+    const name = value.name as string;
+    const referenceType = refMap[name];
+    if (!referenceType) {
+      delete value.name;
+      continue;
+    }
+
+    const indices = (await sourceKnex.raw(
+      `
+      select cast(substr(name, ??) as int) as idx
+      from ?? 
+      order by idx desc 
+      limit 1`,
+      [name.length + 1, referenceType]
+    )) as { idx: number }[];
+
+    value.start = 1001;
+    value.current = indices[0]?.idx ?? value.current ?? value.start;
+    value.referenceType = referenceType;
+  }
+
+  await copyValues(
+    destKnex,
+    ModelNameEnum.NumberSeries,
+    values.filter((v) => v.name),
+    [],
+    {},
+    schema
+  );
+}
+
+async function copyLedgerEntries(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schema: Schema
+) {
+  const values = (await sourceKnex(
+    ModelNameEnum.AccountingLedgerEntry
+  )) as RawValueMap[];
+  await copyValues(
+    destKnex,
+    ModelNameEnum.AccountingLedgerEntry,
+    values,
+    ['description', 'againstAccount', 'balance'],
+    {},
+    schema
+  );
+}
+
+async function copyOtherTables(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schemaMap: SchemaMap
+) {
+  const schemaNames = [
+    ModelNameEnum.Account,
+    ModelNameEnum.Currency,
+    ModelNameEnum.Address,
+    ModelNameEnum.Color,
+    ModelNameEnum.Tax,
+    ModelNameEnum.PatchRun,
+  ];
+
+  for (const sn of schemaNames) {
+    const values = (await sourceKnex(sn)) as RawValueMap[];
+    await copyValues(destKnex, sn, values, [], {}, schemaMap[sn]);
+  }
+}
+
+async function copyTransactionalTables(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schemaMap: SchemaMap
+) {
+  const schemaNames = [
+    ModelNameEnum.JournalEntry,
+    ModelNameEnum.Payment,
+    ModelNameEnum.SalesInvoice,
+    ModelNameEnum.PurchaseInvoice,
+    ModelNameEnum.SalesQuote,
+  ];
+
+  for (const sn of schemaNames) {
+    const values = (await sourceKnex(sn)) as RawValueMap[];
+    values.forEach((v) => {
+      if (!v.submitted) {
+        v.submitted = 0;
+      }
+
+      if (!v.cancelled) {
+        v.cancelled = 0;
+      }
+
+      if (!v.numberSeries) {
+        v.numberSeries = defaultNumberSeriesMap[sn];
+      }
+
+      if (v.customer) {
+        v.party = v.customer;
+      }
+
+      if (v.supplier) {
+        v.party = v.supplier;
+      }
+    });
+    await copyValues(
+      destKnex,
+      sn,
+      values,
+      [],
+      childTableColumnMap,
+      schemaMap[sn]
+    );
+  }
+}
+
+async function copyChildTables(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schemaMap: SchemaMap
+) {
+  const childSchemaNames = Object.keys(schemaMap).filter(
+    (sn) => schemaMap[sn]?.isChild
+  );
+
+  for (const sn of childSchemaNames) {
+    const values = (await sourceKnex(sn)) as RawValueMap[];
+    await copyValues(
+      destKnex,
+      sn,
+      values,
+      [],
+      childTableColumnMap,
+      schemaMap[sn]
+    );
+  }
+}
+
+async function copyItem(sourceKnex: Knex, destKnex: Knex, schema: Schema) {
+  const values = (await sourceKnex(ModelNameEnum.Item)) as RawValueMap[];
+  values.forEach((value) => {
+    value.for = 'Both';
+  });
+
+  await copyValues(destKnex, ModelNameEnum.Item, values, [], {}, schema);
+}
+
+async function copyParty(sourceKnex: Knex, destKnex: Knex, schema: Schema) {
+  const values = (await sourceKnex(ModelNameEnum.Party)) as RawValueMap[];
+  values.forEach((value) => {
+    // customer will be mapped onto role
+    if (Number(value.supplier) === 1) {
+      value.customer = 'Supplier';
+    } else {
+      value.customer = 'Customer';
+    }
+  });
+
+  await copyValues(
+    destKnex,
+    ModelNameEnum.Party,
+    values,
+    ['supplier', 'addressDisplay'],
+    { customer: 'role' },
+    schema
+  );
+}
+
+async function copySingleValues(
+  sourceKnex: Knex,
+  destKnex: Knex,
+  schemaMap: SchemaMap
+) {
+  const singleSchemaNames = Object.keys(schemaMap).filter(
+    (k) => schemaMap[k]?.isSingle
+  );
+  const singleValues = (await sourceKnex(ModelNameEnum.SingleValue).whereIn(
+    'parent',
+    singleSchemaNames
+  )) as RawValueMap[];
+  await copyValues(destKnex, ModelNameEnum.SingleValue, singleValues);
+}
+
+async function copyValues(
+  destKnex: Knex,
+  destTableName: string,
+  values: RawValueMap[],
+  keysToDelete: string[] = [],
+  keyMap: Record<string, string> = {},
+  schema?: Schema
+) {
+  keysToDelete = [...keysToDelete, ...ignoreColumns];
+  keyMap = { ...keyMap, ...columnMap };
+
+  values = values.map((sv) => deleteKeys(sv, keysToDelete));
+  values = values.map((sv) => changeKeys(sv, keyMap));
+
+  if (schema) {
+    values.forEach((v) => notNullify(v, schema));
+  }
+
+  if (schema) {
+    const newKeys = schema?.fields.map((f) => f.fieldname);
+    values.forEach((v) => deleteOldKeys(v, newKeys));
+  }
+
+  await destKnex.batchInsert(destTableName, values, 100);
+}
+
+async function getDestinationDM(sourceDbPath: string, countryCode: string) {
+  /**
+   * This is where all the stuff from the old db will be copied.
+   * That won't be altered cause schema update will cause data loss.
+   */
+
+  const dir = path.parse(sourceDbPath).dir;
+  const dbPath = path.join(dir, '__update_schemas_temp.db');
+  const dm = new DatabaseManager();
+  await dm._connect(dbPath, countryCode);
+  await dm.db!.migrate();
+  await dm.db!.truncate();
+  return dm;
+}
+
+async function getCountryCode(knex: Knex) {
+  /**
+   * Need to account for schema changes, in 0.4.3-beta.0
+   */
+  const country = (
+    (await knex('SingleValue')
+      .select('value')
+      .where({ fieldname: 'country' })) as { value: string }[]
+  )?.[0]?.value;
+
+  if (!country) {
+    return '';
+  }
+
+  return getCountryCodeFromCountry(country);
+}
+
+function notNullify(map: RawValueMap, schema: Schema) {
+  for (const field of schema.fields) {
+    if (!field.required || !getIsNullOrUndef(map[field.fieldname])) {
+      continue;
+    }
+
+    switch (field.fieldtype) {
+      case FieldTypeEnum.Float:
+      case FieldTypeEnum.Int:
+      case FieldTypeEnum.Check:
+        map[field.fieldname] = 0;
+        break;
+      case FieldTypeEnum.Currency:
+        map[field.fieldname] = '0.00000000000';
+        break;
+      case FieldTypeEnum.Table:
+        continue;
+      default:
+        map[field.fieldname] = '';
+    }
+  }
+}
+
+function deleteOldKeys(map: RawValueMap, newKeys: string[]) {
+  for (const key of Object.keys(map)) {
+    if (newKeys.includes(key)) {
+      continue;
+    }
+
+    delete map[key];
+  }
+}
+
+export default { execute, beforeMigrate: true };
+
+======================================================================
+FILE: backend\patches\v0_21_0\fixLedgerDateTime.ts
+======================================================================
+import { DatabaseManager } from '../../database/manager';
+
+/* eslint-disable */
+async function execute(dm: DatabaseManager) {
+
+    const sourceTables = [
+        "PurchaseInvoice", 
+        "SalesInvoice", 
+        "JournalEntry",
+        "Payment", 
+        "StockMovement", 
+        "StockTransfer"
+    ];
+
+    await dm.db!.knex!('AccountingLedgerEntry')
+        .select('name', 'date', 'referenceName')
+        .then((trx: Array<{name: string; date: Date; referenceName: string;}> ) => {
+            trx.forEach(async entry => {
+
+                sourceTables.forEach(async table => {
+                    await dm.db!.knex!
+                    .select('name','date')
+                    .from(table)
+                    .where({ name: entry['referenceName'] })
+                    .then(async (resp: Array<{name: string; date: Date;}>) => {
+                        if (resp.length !== 0) {
+                            
+                            const dateTimeValue = new Date(resp[0]['date']);
+                            await dm.db!.knex!('AccountingLedgerEntry')
+                            .where({ name: entry['name'] })
+                            .update({ date: dateTimeValue.toISOString() });
+                        }
+                    })
+                });
+            });
+        });
+}
+
+export default { execute, beforeMigrate: true };
+/* eslint-enable */
+
