@@ -262,6 +262,7 @@ import PartyInvoicesModal, { KhataParty, KhataInvoice } from './PartyInvoicesMod
 import { fyo } from 'src/initFyo';
 import router from 'src/router';
 import { showToast } from 'src/utils/interactive';
+import { safeParseFloat } from 'utils/index';
 
 export default defineComponent({
   name: 'Khata',
@@ -382,39 +383,41 @@ export default defineComponent({
           fields: ['name', 'role', 'phone', 'email'],
         })) as { name: string; role: 'Customer' | 'Supplier' | 'Both'; phone?: string; email?: string }[];
 
-        // 2. Fetch pending sales invoices (Customers)
+        // 2. Fetch pending sales invoices (Customers) - Removed 'dueDate' as it does not exist
         const rawSalesInvoices = (await fyo.db.getAllRaw('SalesInvoice', {
-          fields: ['name', 'party', 'date', 'dueDate', 'grandTotal', 'outstandingAmount'],
+          fields: ['name', 'party', 'date', 'grandTotal', 'outstandingAmount'],
           filters: {
             submitted: true,
             cancelled: false,
           },
-        })) as { name: string; party: string; date: string; dueDate?: string; grandTotal: number; outstandingAmount: number }[];
+        })) as { name: string; party: string; date: string; grandTotal: string | number; outstandingAmount: string | number }[];
 
-        // 3. Fetch pending purchase invoices (Suppliers)
+        // 3. Fetch pending purchase invoices (Suppliers) - Removed 'dueDate'
         const rawPurchaseInvoices = (await fyo.db.getAllRaw('PurchaseInvoice', {
-          fields: ['name', 'party', 'date', 'dueDate', 'grandTotal', 'outstandingAmount'],
+          fields: ['name', 'party', 'date', 'grandTotal', 'outstandingAmount'],
           filters: {
             submitted: true,
             cancelled: false,
           },
-        })) as { name: string; party: string; date: string; dueDate?: string; grandTotal: number; outstandingAmount: number }[];
+        })) as { name: string; party: string; date: string; grandTotal: string | number; outstandingAmount: string | number }[];
 
         // Map invoices by party
         const salesByParty = new Map<string, KhataInvoice[]>();
         for (const inv of rawSalesInvoices) {
-          if (inv.outstandingAmount > 0) {
+          const outstanding = safeParseFloat(inv.outstandingAmount);
+          if (outstanding > 0) {
             const list = salesByParty.get(inv.party) || [];
-            list.push({ ...inv, schemaName: 'SalesInvoice' });
+            list.push({ ...inv, grandTotal: safeParseFloat(inv.grandTotal), outstandingAmount: outstanding, schemaName: 'SalesInvoice' });
             salesByParty.set(inv.party, list);
           }
         }
 
         const purchaseByParty = new Map<string, KhataInvoice[]>();
         for (const inv of rawPurchaseInvoices) {
-          if (inv.outstandingAmount > 0) {
+          const outstanding = safeParseFloat(inv.outstandingAmount);
+          if (outstanding > 0) {
             const list = purchaseByParty.get(inv.party) || [];
-            list.push({ ...inv, schemaName: 'PurchaseInvoice' });
+            list.push({ ...inv, grandTotal: safeParseFloat(inv.grandTotal), outstandingAmount: outstanding, schemaName: 'PurchaseInvoice' });
             purchaseByParty.set(inv.party, list);
           }
         }
@@ -435,7 +438,7 @@ export default defineComponent({
           }
 
           const totalOutstanding = partyInvoices.reduce(
-            (sum, inv) => sum + (inv.outstandingAmount || 0),
+            (sum, inv) => sum + inv.outstandingAmount,
             0
           );
 
