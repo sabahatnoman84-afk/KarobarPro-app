@@ -1,0 +1,140 @@
+{
+  "tree": {
+    "Application of Funds (Assets)": {
+      "Current Assets": {
+        "Accounts Receivable": {
+          "Debtors": {
+            "accountType": "Receivable"
+          }
+        },
+        "Bank Accounts": {
+          "Main Bank Account": {
+            "accountType": "Bank"
+          },
+          "accountType": "Bank",
+          "isGroup": true
+        },
+        "Cash In Hand": {
+          "Cash": {
+            "accountType": "Cash"
+          },
+          "accountType": "Cash"
+        },
+        "Stock Assets": {
+          "Stock In Hand": {
+            "accountType": "Stock"
+          },
+          "accountType": "Stock"
+        },
+        "Tax Assets": {
+          "Sales Tax Receivable": {
+            "accountType": "Tax"
+          },
+          "Income Tax Receivable": {
+            "accountType": "Tax"
+          },
+          "isGroup": true
+        }
+      },
+      "Fixed Assets": {
+        "Furniture and Fixtures": {
+          "accountType": "Fixed Asset"
+        },
+        "Office Equipment": {
+          "accountType": "Fixed Asset"
+        },
+        "Vehicles": {
+          "accountType": "Fixed Asset"
+        },
+        "Accumulated Depreciation": {
+          "accountType": "Accumulated Depreciation"
+        }
+      },
+      "rootType": "Asset"
+    },
+    "Expenses": {
+      "Direct Expenses": {
+        "Stock Expenses": {
+          "Cost of Goods Sold": {
+            "accountType": "Cost of Goods Sold"
+          },
+          "Stock Adjustment": {
+            "accountType": "Stock Adjustment"
+          }
+        }
+      },
+      "Indirect Expenses": {
+        "Administrative Expenses": {
+          "Office Rent": {},
+          "Salaries and Wages": {},
+          "Utility Bills": {},
+          "Print and Stationery": {}
+        },
+        "Marketing Expenses": {
+          "accountType": "Chargeable"
+        },
+        "Freight and Forwarding Charges": {
+          "accountType": "Chargeable"
+        },
+        "Legal and Professional Charges": {},
+        "Bank Charges": {},
+        "Round Off": {
+          "accountType": "Round Off"
+        },
+        "Write Off": {}
+      },
+      "rootType": "Expense"
+    },
+    "Income": {
+      "Direct Income": {
+        "Sales": {},
+        "Services": {}
+      },
+      "Indirect Income": {
+        "Other Income": {},
+        "isGroup": true
+      },
+      "rootType": "Income"
+    },
+    "Source of Funds (Liabilities)": {
+      "Current Liabilities": {
+        "Accounts Payable": {
+          "Creditors": {
+            "accountType": "Payable"
+          }
+        },
+        "Stock Liabilities": {
+          "Stock Received But Not Billed": {
+            "accountType": "Stock Received But Not Billed"
+          }
+        },
+        "Duties and Taxes": {
+          "FBR Sales Tax Payable": {
+            "accountType": "Tax"
+          },
+          "Provincial Tax Payable (PRA/SRB)": {
+            "accountType": "Tax"
+          },
+          "Withholding Tax Payable": {
+            "accountType": "Tax"
+          },
+          "accountType": "Tax",
+          "isGroup": true
+        }
+      },
+      "rootType": "Liability"
+    },
+    "Equity": {
+      "Capital Stock": {
+        "accountType": "Equity"
+      },
+      "Opening Balance Equity": {
+        "accountType": "Equity"
+      },
+      "Retained Earnings": {
+        "accountType": "Equity"
+      },
+      "rootType": "Equity"
+    }
+  }
+}

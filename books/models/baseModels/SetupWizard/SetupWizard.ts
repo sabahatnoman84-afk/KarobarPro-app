@@ -31,6 +31,7 @@ export function getCOAList() {
     { countryCode: 'gt', name: 'Guatemala - Cuentas' },
     { countryCode: 'hu', name: 'Hungary - Chart of Accounts' },
     { countryCode: 'id', name: 'Indonesia - Chart of Accounts' },
+    { countryCode: 'pk', name: 'Pakistan - Chart of Accounts' },
     { countryCode: 'in', name: 'India - Chart of Accounts' },
     { countryCode: 'mx', name: 'Mexico - Plan de Cuentas' },
     { countryCode: 'ni', name: 'Nicaragua - Catalogo de Cuentas' },
