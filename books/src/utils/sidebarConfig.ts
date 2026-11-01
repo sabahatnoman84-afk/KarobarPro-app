@@ -54,7 +54,6 @@ function getRegionalSidebar(): SidebarRoot[] {
   ];
 }
 
-// NEW: FBR Sidebar Group
 function getFBRSidebar(): SidebarRoot[] {
   const countryCode = fyo.singles.SystemSettings?.countryCode;
   if (countryCode !== 'pk') {
@@ -166,6 +165,11 @@ function getReportSidebar() {
         label: t`Trial Balance`,
         name: 'trial-balance',
         route: '/report/TrialBalance',
+      },
+      {
+        label: t`Daily Delivery Summary`,
+        name: 'daily-delivery-summary',
+        route: '/report/DailyDeliverySummary',
       },
     ],
   };

@@ -8,6 +8,7 @@ import { StockBalance } from './inventory/StockBalance';
 import { StockLedger } from './inventory/StockLedger';
 import { SalesTaxReturn } from './FBRTax/SalesTaxReturn';
 import { WithholdingTax } from './FBRTax/WithholdingTax';
+import { DailyDeliverySummary } from './Sales/DailyDeliverySummary';
 
 export const reports = {
   GeneralLedger,
@@ -20,4 +21,5 @@ export const reports = {
   StockBalance,
   SalesTaxReturn,
   WithholdingTax,
+  DailyDeliverySummary,
 } as const;
