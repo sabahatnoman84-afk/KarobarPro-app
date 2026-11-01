@@ -25,6 +25,11 @@ yarn-error.log*
 *.sw?
 *.code-workspace
 
-#Electron-builder output
+# Electron-builder output
 /dist_electron
 log_creds.txt
+
+# Databases and Backups (CRITICAL)
+*.db
+*.karobar.db
+backups/
