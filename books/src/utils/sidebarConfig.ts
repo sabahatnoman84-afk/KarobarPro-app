@@ -54,6 +54,35 @@ function getRegionalSidebar(): SidebarRoot[] {
   ];
 }
 
+// NEW: FBR Sidebar Group
+function getFBRSidebar(): SidebarRoot[] {
+  const countryCode = fyo.singles.SystemSettings?.countryCode;
+  if (countryCode !== 'pk') {
+    return [];
+  }
+
+  return [
+    {
+      label: t`FBR Tax`,
+      name: 'fbr-tax',
+      icon: 'percentage',
+      route: '/report/SalesTaxReturn',
+      items: [
+        {
+          label: t`Sales Tax Return`,
+          name: 'sales-tax-return',
+          route: '/report/SalesTaxReturn',
+        },
+        {
+          label: t`Withholding Tax`,
+          name: 'withholding-tax',
+          route: '/report/WithholdingTax',
+        },
+      ],
+    },
+  ];
+}
+
 function getInventorySidebar(): SidebarRoot[] {
   const hasInventory = !!fyo.singles.AccountingSettings?.enableInventory;
   if (!hasInventory) {
@@ -305,6 +334,7 @@ function getCompleteSidebar(): SidebarConfig {
       ] as SidebarItem[],
     },
     getReportSidebar(),
+    getFBRSidebar(),
     getInventorySidebar(),
     getPOSSidebar(),
     getRegionalSidebar(),
@@ -338,7 +368,6 @@ function getCompleteSidebar(): SidebarConfig {
         {
           label: t`Customize Form`,
           name: 'customize-form',
-          // route: `/customize-form`,
           route: `/list/CustomForm/${t`Customize Form`}`,
           hidden: () =>
             !fyo.singles.AccountingSettings?.enableFormCustomization,

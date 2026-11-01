@@ -6,6 +6,8 @@ import { ProfitAndLoss } from './ProfitAndLoss/ProfitAndLoss';
 import { TrialBalance } from './TrialBalance/TrialBalance';
 import { StockBalance } from './inventory/StockBalance';
 import { StockLedger } from './inventory/StockLedger';
+import { SalesTaxReturn } from './FBRTax/SalesTaxReturn';
+import { WithholdingTax } from './FBRTax/WithholdingTax';
 
 export const reports = {
   GeneralLedger,
@@ -16,4 +18,6 @@ export const reports = {
   GSTR2,
   StockLedger,
   StockBalance,
+  SalesTaxReturn,
+  WithholdingTax,
 } as const;
