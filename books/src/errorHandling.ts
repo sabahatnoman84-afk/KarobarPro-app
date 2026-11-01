@@ -197,6 +197,11 @@ function getFeatureFlags(): string[] {
   const getBooleanFields = (docName: string) => {
     const doc = fyo.singles[docName];
 
+    // ADDED SAFETY CHECK HERE
+    if (!doc) {
+      return {};
+    }
+
     return Object.entries(doc as Doc).reduce((acc, [key, value]) => {
       const fieldsArray = fyo.schemaMap[docName]?.fields ?? [];
       const fieldsMap = new Map(fieldsArray.map((f) => [f.fieldname, f]));
