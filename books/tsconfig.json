@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "ignoreDeprecations": "6.0",
     "target": "es2020",
     "module": "esnext",
     "strict": true,
@@ -12,7 +13,6 @@
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,
     "sourceMap": true,
-    "types": ["webpack-env"],
     "baseUrl": ".",
     "paths": {
       "src/*": ["src/*"],
