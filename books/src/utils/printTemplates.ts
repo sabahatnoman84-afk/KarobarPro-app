@@ -174,6 +174,7 @@ export async function getPrintTemplatePropValues(
 
   return values;
 }
+
 async function getPaymentDetails(doc: Doc, paymentId: string[]) {
   const paymentIds = paymentId.sort();
   const paymentDetails = [];
@@ -241,110 +242,52 @@ export function getPrintTemplatePropHints(schemaName: string, fyo: Fyo) {
   return hints;
 }
 
+// --- UPGRADED PAKISTANI NUMBER TO WORDS (LAKH / CRORE) ---
 function getGrandTotalInWords(total: number) {
   const formattedTotal = total.toFixed(2);
-
   const [integerPart, decimalPart] = formattedTotal.split('.');
 
-  const ones = [
-    '',
-    t`One`,
-    t`Two`,
-    t`Three`,
-    t`Four`,
-    t`Five`,
-    t`Six`,
-    t`Seven`,
-    t`Eight`,
-    t`Nine`,
-  ];
+  const ones = ['', t`One`, t`Two`, t`Three`, t`Four`, t`Five`, t`Six`, t`Seven`, t`Eight`, t`Nine`, t`Ten`, t`Eleven`, t`Twelve`, t`Thirteen`, t`Fourteen`, t`Fifteen`, t`Sixteen`, t`Seventeen`, t`Eighteen`, t`Nineteen`];
+  const tens = ['', '', t`Twenty`, t`Thirty`, t`Forty`, t`Fifty`, t`Sixty`, t`Seventy`, t`Eighty`, t`Ninety`];
 
-  const teens = [
-    t`Ten`,
-    t`Eleven`,
-    t`Twelve`,
-    t`Thirteen`,
-    t`Fourteen`,
-    t`Fifteen`,
-    t`Sixteen`,
-    t`Seventeen`,
-    t`Eighteen`,
-    t`Nineteen`,
-  ];
-
-  const tens = [
-    '',
-    '',
-    t`Twenty`,
-    t`Thirty`,
-    t`Forty`,
-    t`Fifty`,
-    t`Sixty`,
-    t`Seventy`,
-    t`Eighty`,
-    t`Ninety`,
-  ];
-
-  const scales = ['', t`Thousand`, t`Million`, t`Billion`];
-
-  function convertThreeDigitNumber(num: number) {
-    let result = '';
-
-    const hundredDigit = Math.floor(num / 100);
-    const remainder = num % 100;
-
-    if (hundredDigit > 0) {
-      result += ones[hundredDigit] + ` ${t`Hundred`}`;
-    }
-
-    if (remainder > 0) {
-      if (hundredDigit > 0) {
-        result += ` ${t`And`} `;
-      }
-
-      if (remainder < 10) {
-        result += ones[remainder];
-      } else if (remainder < 20) {
-        result += teens[remainder - 10];
-      } else {
-        const tensDigit = Math.floor(remainder / 10);
-        const onesDigit = remainder % 10;
-        result += tens[tensDigit];
-        if (onesDigit > 0) {
-          result += ' ' + ones[onesDigit];
-        }
-      }
-    }
-
-    return result;
+  function convertTwoDigits(num: number): string {
+    if (num < 20) return ones[num];
+    const ten = Math.floor(num / 10);
+    const one = num % 10;
+    return tens[ten] + (one > 0 ? ' ' + ones[one] : '');
   }
 
-  let spelledOutInteger = '';
-  const integerGroups = integerPart.match(/(\d{1,3})(?=(\d{3})*$)/g) || [];
-  const groupCount = integerGroups.length;
+  let num = parseInt(integerPart);
+  if (num === 0) return t`Zero Rupees`;
 
-  integerGroups.forEach((group, index) => {
-    const groupValue = parseInt(group);
+  let words = '';
 
-    if (groupValue > 0) {
-      const groupText = convertThreeDigitNumber(groupValue);
-      const groupSuffix = scales[groupCount - index - 1];
-      spelledOutInteger +=
-        groupText + (groupSuffix ? ' ' + groupSuffix : '') + ' ';
-    }
-  });
+  const crores = Math.floor(num / 10000000);
+  num %= 10000000;
+  const lakhs = Math.floor(num / 100000);
+  num %= 100000;
+  const thousands = Math.floor(num / 1000);
+  num %= 1000;
+  const hundreds = Math.floor(num / 100);
+  const tensOnes = num % 100;
 
-  spelledOutInteger = spelledOutInteger.trim() || t`Zero`;
+  if (crores > 0) words += convertTwoDigits(crores) + ` ${t`Crore`} `;
+  if (lakhs > 0) words += convertTwoDigits(lakhs) + ` ${t`Lakh`} `;
+  if (thousands > 0) words += convertTwoDigits(thousands) + ` ${t`Thousand`} `;
+  if (hundreds > 0) words += ones[hundreds] + ` ${t`Hundred`} `;
+  if (tensOnes > 0) {
+    if (words !== '') words += ` ${t`And`} `;
+    words += convertTwoDigits(tensOnes);
+  }
 
-  let spelledOutDecimal = '';
+  words = words.trim() + ` ${t`Rupees`}`;
+
   const decimalCents = parseInt(decimalPart);
-
   if (decimalCents !== 0) {
-    spelledOutDecimal =
-      ` ${t`and`} ` + convertThreeDigitNumber(decimalCents) + ` ${t`Paisa`}`;
+    words += ` ${t`And`} ` + convertTwoDigits(decimalCents) + ` ${t`Paisa`}`;
   }
 
-  return `${spelledOutInteger}${spelledOutDecimal} ${t`only`}`;
+  return words + ` ${t`Only`}`;
 }
 
 function showHSN(doc: Doc): boolean {
@@ -679,25 +622,90 @@ function getNameAndTypeFromTemplateFile(
   });
 }
 
-export const baseTemplate = `<main class="h-full w-full bg-white">
+// --- UPGRADED FULL PAKISTANI INVOICE TEMPLATE ---
+export const baseTemplate = `
+<main class="h-full w-full bg-white text-gray-800 font-sans p-6" style="font-family: {{ print.font }};">
 
-  <!-- Edit This Code -->
-  <header class="p-4 flex justify-between border-b">
-    <h2 
-      class="font-semibold text-2xl" 
-      :style="{ color: print.color }"
-    >
-      {{ print.companyName }}
-    </h2>
-    <h2 class="font-semibold text-2xl" >
-      {{ doc.name }}
-    </h2>
+  <!-- Header -->
+  <header class="flex justify-between items-start border-b pb-4 mb-6">
+    <div>
+      <h1 class="text-3xl font-bold mb-1" style="color: {{ print.color }}">
+        {{ print.companyName }}
+      </h1>
+      <p class="text-sm text-gray-500">{{ print.address }}</p>
+      <p class="text-sm text-gray-500" v-if="print.phone">Phone: {{ print.phone }}</p>
+      <p class="text-sm text-gray-500" v-if="print.taxId">NTN: {{ print.taxId }}</p>
+      <p class="text-sm text-gray-500" v-if="print.gstin">STRN: {{ print.gstin }}</p>
+    </div>
+    <div class="text-right">
+      <h2 class="text-2xl font-semibold">{{ doc.entryLabel }}</h2>
+      <p class="text-sm font-medium mt-1"># {{ doc.name }}</p>
+      <p class="text-sm text-gray-500">Date: {{ doc.date }}</p>
+    </div>
   </header>
 
-  <div class="p-4 text-gray-600">
-    Edit the code in the Template Editor on the right
-    to create your own personalized custom template.
+  <!-- Customer & QR Code -->
+  <div class="flex justify-between items-start mb-6">
+    <div>
+      <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Billed To</h3>
+      <p class="font-semibold text-lg">{{ doc.links.party.name }}</p>
+      <p class="text-sm" v-if="doc.links.party.ntn">NTN: {{ doc.links.party.ntn }}</p>
+      <p class="text-sm" v-if="doc.links.party.cnic">CNIC: {{ doc.links.party.cnic }}</p>
+      <p class="text-sm" v-if="doc.links.party.phone">Phone: {{ doc.links.party.phone }}</p>
+    </div>
+    
+    <!-- JazzCash/EasyPaisa QR Code -->
+    <div class="text-right" v-if="doc.paymentQr">
+      <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Scan to Pay</h3>
+      <img src="{{ doc.paymentQr }}" class="w-24 h-24 inline-block border p-1 rounded" alt="Payment QR" />
+      <p class="text-xs text-gray-500 mt-1">{{ doc.paymentAccount }}</p>
+    </div>
   </div>
 
+  <!-- Items Table -->
+  <div class="mb-6">
+    <table class="w-full text-left border-collapse">
+      <thead>
+        <tr class="border-b-2 border-gray-300 bg-gray-50">
+          <th class="p-2 text-sm font-semibold">Item</th>
+          <th class="p-2 text-sm font-semibold text-right">Qty</th>
+          <th class="p-2 text-sm font-semibold text-right">Rate</th>
+          <th class="p-2 text-sm font-semibold text-right">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b" v-for="item in doc.items">
+          <td class="p-2 text-sm">{{ item.item }}</td>
+          <td class="p-2 text-sm text-right">{{ item.quantity }}</td>
+          <td class="p-2 text-sm text-right">{{ item.rate }}</td>
+          <td class="p-2 text-sm text-right">{{ item.amount }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Totals -->
+  <div class="flex justify-end mb-10">
+    <div class="w-1/2">
+      <div class="flex justify-between py-1 border-b border-gray-200">
+        <span class="text-sm text-gray-600">Subtotal</span>
+        <span class="text-sm font-medium">{{ doc.subTotal }}</span>
+      </div>
+      <div class="flex justify-between py-1 border-b border-gray-200" v-if="doc.taxes" v-for="tax in doc.taxes">
+        <span class="text-sm text-gray-600">{{ tax.account }}</span>
+        <span class="text-sm font-medium">{{ tax.amount }}</span>
+      </div>
+      <div class="flex justify-between py-2 mt-1 text-lg font-bold">
+        <span>Total</span>
+        <span style="color: {{ print.color }}">{{ doc.grandTotal }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="border-t pt-4">
+    <p class="text-sm italic text-gray-600"><strong>In Words:</strong> {{ doc.grandTotalInWords }}</p>
+    <p class="text-xs text-gray-400 mt-6 text-center">Generated by KarobarPro - Made in Pakistan</p>
+  </div>
 </main>
 `;
