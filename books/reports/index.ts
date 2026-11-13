@@ -6,6 +6,7 @@ import { ProfitAndLoss } from './ProfitAndLoss/ProfitAndLoss';
 import { TrialBalance } from './TrialBalance/TrialBalance';
 import { StockBalance } from './inventory/StockBalance';
 import { StockLedger } from './inventory/StockLedger';
+import { LowStockReport } from './inventory/LowStockReport';
 import { SalesTaxReturn } from './FBRTax/SalesTaxReturn';
 import { WithholdingTax } from './FBRTax/WithholdingTax';
 import { DailyDeliverySummary } from './Sales/DailyDeliverySummary';
@@ -19,6 +20,7 @@ export const reports = {
   GSTR2,
   StockLedger,
   StockBalance,
+  LowStockReport,
   SalesTaxReturn,
   WithholdingTax,
   DailyDeliverySummary,

@@ -124,6 +124,11 @@ function getInventorySidebar(): SidebarRoot[] {
           name: 'stock-balance',
           route: '/report/StockBalance',
         },
+        {
+          label: t`Low Stock Alert`,
+          name: 'low-stock-report',
+          route: '/report/LowStockReport',
+        },
       ],
     },
   ];

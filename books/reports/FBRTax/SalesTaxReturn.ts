@@ -7,21 +7,6 @@ import { Field } from 'schemas/types';
 import getCommonExportActions from 'reports/commonExporter';
 import { safeParseFloat } from 'utils/index';
 
-// Define exact types to satisfy TypeScript
-interface RawInvoice {
-  name: string;
-  party: string;
-  date: string;
-  netTotal: string | number;
-  grandTotal: string | number;
-}
-
-interface RawParty {
-  name: string;
-  ntn?: string;
-  cnic?: string;
-}
-
 export class SalesTaxReturn extends Report {
   static title = t`FBR Sales Tax Return`;
   static reportName = 'fbr-sales-tax-return';
@@ -70,35 +55,33 @@ export class SalesTaxReturn extends Report {
 
     try {
       if (!this.month) this.setDefaultFilters();
-      const monthStr = this.month!;
 
-      const startOfMonth = DateTime.fromFormat(monthStr, 'yyyy-MM').startOf('month').toISODate();
-      const endOfMonth = DateTime.fromFormat(monthStr, 'yyyy-MM').endOf('month').toISODate();
+      const startOfMonth = DateTime.fromFormat(this.month!, 'yyyy-MM').startOf('month').toISODate();
+      const endOfMonth = DateTime.fromFormat(this.month!, 'yyyy-MM').endOf('month').toISODate();
 
       // 1. Fetch Sales Invoices (Output Tax)
-      const salesInvoices = (await this.fyo.db.getAllRaw(ModelNameEnum.SalesInvoice, {
+      const salesInvoices = await this.fyo.db.getAllRaw(ModelNameEnum.SalesInvoice, {
         filters: { date: ['>=', startOfMonth, '<=', endOfMonth], submitted: true, cancelled: false },
         fields: ['*'],
-      })) as unknown as RawInvoice[];
+      });
 
       // 2. Fetch Purchase Invoices (Input Tax)
-      const purchaseInvoices = (await this.fyo.db.getAllRaw(ModelNameEnum.PurchaseInvoice, {
+      const purchaseInvoices = await this.fyo.db.getAllRaw(ModelNameEnum.PurchaseInvoice, {
         filters: { date: ['>=', startOfMonth, '<=', endOfMonth], submitted: true, cancelled: false },
         fields: ['*'],
-      })) as unknown as RawInvoice[];
+      });
 
       // 3. Fetch Parties to get NTN/CNIC
-      const partyNames = new Set<string>();
-      salesInvoices.forEach((i) => { if (i.party) partyNames.add(i.party); });
-      purchaseInvoices.forEach((i) => { if (i.party) partyNames.add(i.party); });
-
-      const parties = (await this.fyo.db.getAllRaw(ModelNameEnum.Party, {
+      const partyNames = new Set([
+        ...salesInvoices.map((i) => i.party),
+        ...purchaseInvoices.map((i) => i.party),
+      ]);
+      const parties = await this.fyo.db.getAllRaw(ModelNameEnum.Party, {
         filters: { name: ['in', Array.from(partyNames)] },
         fields: ['name', 'ntn', 'cnic'],
-      })) as unknown as RawParty[];
-
+      });
       const partyMap = parties.reduce((acc, p) => {
-        acc[p.name] = p.ntn || p.cnic || '';
+        acc[p.name as string] = (p.ntn as string) || (p.cnic as string) || '';
         return acc;
       }, {} as Record<string, string>);
 
@@ -115,10 +98,12 @@ export class SalesTaxReturn extends Report {
         const netTotal = safeParseFloat(inv.netTotal);
         const grandTotal = safeParseFloat(inv.grandTotal);
         const taxAmt = grandTotal - netTotal;
-
+        
+        // Skip zero-rated for this basic version, focus on taxable
         if (taxAmt > 0) {
           outputTaxable += netTotal;
           outputTax += taxAmt;
+          
           reportData.push(this.getInvoiceRow(inv, netTotal, taxAmt, partyMap));
         }
       }
@@ -135,17 +120,18 @@ export class SalesTaxReturn extends Report {
         if (taxAmt > 0) {
           inputTaxable += netTotal;
           inputTax += taxAmt;
+          
           reportData.push(this.getInvoiceRow(inv, netTotal, taxAmt, partyMap));
         }
       }
 
       // --- SECTION 3: SUMMARY ---
       reportData.push(this.getSpacerRow());
-      reportData.push(this.getHeaderRow(t`TAX SUMMARY FOR ${monthStr}`));
-
+      reportData.push(this.getHeaderRow(t`TAX SUMMARY FOR ${this.month}`));
+      
       reportData.push(this.getSummaryRow(t`Total Output Tax (Sales)`, outputTaxable, outputTax));
       reportData.push(this.getSummaryRow(t`Total Input Tax (Purchases)`, inputTaxable, inputTax));
-
+      
       const netPayable = outputTax - inputTax;
       reportData.push(
         this.getSummaryRow(
@@ -166,19 +152,16 @@ export class SalesTaxReturn extends Report {
 
   // --- UI Helper Methods ---
 
-  private getInvoiceRow(inv: RawInvoice, taxable: number, tax: number, partyMap: Record<string, string>): ReportRow {
-    const ntnCnic = partyMap[inv.party] || '-';
-    const rate = taxable > 0 ? Math.round((tax / taxable) * 100) : 0;
-
+  private getInvoiceRow(inv: any, taxable: number, tax: number, partyMap: Record<string, string>): ReportRow {
     return {
       cells: [
         { rawValue: '', value: '', align: 'left', width: 2 },
-        { rawValue: inv.name, value: inv.name, align: 'left', width: 1.2 },
-        { rawValue: inv.date, value: DateTime.fromISO(inv.date).toFormat('dd-MMM-yy'), align: 'left', width: 1 },
-        { rawValue: inv.party, value: inv.party, align: 'left', width: 1.5 },
-        { rawValue: ntnCnic, value: ntnCnic, align: 'left', width: 1.2 },
+        { rawValue: inv.name, value: inv.name as string, align: 'left', width: 1.2 },
+        { rawValue: inv.date, value: DateTime.fromISO(inv.date as string).toFormat('dd-MMM-yy'), align: 'left', width: 1 },
+        { rawValue: inv.party, value: inv.party as string, align: 'left', width: 1.5 },
+        { rawValue: partyMap[inv.party] || '-', value: partyMap[inv.party] || '-', align: 'left', width: 1.2 },
         { rawValue: taxable, value: this.fyo.format(taxable, 'Currency'), align: 'right', width: 1.2 },
-        { rawValue: rate, value: `${rate}%`, align: 'right', width: 0.8 },
+        { rawValue: (tax/taxable)*100, value: `${Math.round((tax/taxable)*100)}%`, align: 'right', width: 0.8 },
         { rawValue: tax, value: this.fyo.format(tax, 'Currency'), align: 'right', width: 1.2 },
       ],
     };
@@ -192,10 +175,10 @@ export class SalesTaxReturn extends Report {
         { rawValue: '', value: '', align: 'left', width: 1 },
         { rawValue: '', value: '', align: 'left', width: 1.5 },
         { rawValue: '', value: '', align: 'left', width: 1.2 },
-        {
-          rawValue: taxable ?? '',
-          value: taxable !== null ? this.fyo.format(taxable, 'Currency') : '',
-          align: 'right', width: 1.2, bold: isBold
+        { 
+          rawValue: taxable ?? '', 
+          value: taxable !== null ? this.fyo.format(taxable, 'Currency') : '', 
+          align: 'right', width: 1.2, bold: isBold 
         },
         { rawValue: '', value: '', align: 'right', width: 0.8 },
         { rawValue: tax, value: this.fyo.format(tax, 'Currency'), align: 'right', width: 1.2, bold: isBold },
