@@ -6,7 +6,22 @@ import { ColumnField, ReportData, ReportRow, ReportCell } from 'reports/types';
 import { Field } from 'schemas/types';
 import getCommonExportActions from 'reports/commonExporter';
 import { safeParseFloat } from 'utils/index';
-import { FBRInvoiceRow, FBRSummaryRow, FBRReportData } from './types';
+import { FBRInvoiceRow, FBRSummaryRow } from './types';
+
+// Define exact types to satisfy TypeScript
+interface RawInvoice {
+  name: string;
+  party: string;
+  date: string;
+  netTotal: string | number;
+  grandTotal: string | number;
+}
+
+interface RawParty {
+  name: string;
+  ntn?: string;
+  cnic?: string;
+}
 
 export class SalesTaxReturn extends Report {
   static title = t`FBR Sales Tax Return`;
@@ -57,33 +72,35 @@ export class SalesTaxReturn extends Report {
 
     try {
       if (!this.month) this.setDefaultFilters();
+      const monthStr = this.month!;
 
-      const startOfMonth = DateTime.fromFormat(this.month!, 'yyyy-MM').startOf('month').toISODate();
-      const endOfMonth = DateTime.fromFormat(this.month!, 'yyyy-MM').endOf('month').toISODate();
+      const startOfMonth = DateTime.fromFormat(monthStr, 'yyyy-MM').startOf('month').toISODate();
+      const endOfMonth = DateTime.fromFormat(monthStr, 'yyyy-MM').endOf('month').toISODate();
 
-      // 1. Fetch Invoices
-      const salesInvoices = await this.fyo.db.getAllRaw(ModelNameEnum.SalesInvoice, {
+      // 1. Fetch Invoices (Casted to satisfy TypeScript)
+      const salesInvoices = (await this.fyo.db.getAllRaw(ModelNameEnum.SalesInvoice, {
         filters: { date: ['>=', startOfMonth, '<=', endOfMonth], submitted: true, cancelled: false },
         fields: ['*'],
-      });
+      })) as unknown as RawInvoice[];
 
-      const purchaseInvoices = await this.fyo.db.getAllRaw(ModelNameEnum.PurchaseInvoice, {
+      const purchaseInvoices = (await this.fyo.db.getAllRaw(ModelNameEnum.PurchaseInvoice, {
         filters: { date: ['>=', startOfMonth, '<=', endOfMonth], submitted: true, cancelled: false },
         fields: ['*'],
-      });
+      })) as unknown as RawInvoice[];
 
       // 2. Fetch Parties for NTN/CNIC
       const partyNames = new Set([
         ...salesInvoices.map((i) => i.party),
         ...purchaseInvoices.map((i) => i.party),
       ]);
-      const parties = await this.fyo.db.getAllRaw(ModelNameEnum.Party, {
+      
+      const parties = (await this.fyo.db.getAllRaw(ModelNameEnum.Party, {
         filters: { name: ['in', Array.from(partyNames)] },
         fields: ['name', 'ntn', 'cnic'],
-      });
+      })) as unknown as RawParty[];
       
       const partyMap = parties.reduce((acc, p) => {
-        acc[p.name as string] = (p.ntn as string) || (p.cnic as string) || '-';
+        acc[p.name] = (p.ntn as string) || (p.cnic as string) || '-';
         return acc;
       }, {} as Record<string, string>);
 
@@ -104,10 +121,10 @@ export class SalesTaxReturn extends Report {
         const taxAmt = grandTotal - netTotal;
         
         const row: FBRInvoiceRow = {
-          name: inv.name as string,
-          date: inv.date as string,
-          party: inv.party as string,
-          ntnOrCnic: partyMap[inv.party as string] || '-',
+          name: inv.name,
+          date: inv.date,
+          party: inv.party,
+          ntnOrCnic: partyMap[inv.party] || '-',
           invoiceValue: grandTotal,
           taxableValue: netTotal,
           taxAmount: taxAmt,
@@ -119,7 +136,7 @@ export class SalesTaxReturn extends Report {
           outputTaxable += netTotal;
           outputTax += taxAmt;
         } else {
-          salesZeroRated.push(row); // 0% Tax or Exempt
+          salesZeroRated.push(row);
         }
       }
 
@@ -131,10 +148,10 @@ export class SalesTaxReturn extends Report {
 
         if (taxAmt > 0) {
           purchasesTaxable.push({
-            name: inv.name as string,
-            date: inv.date as string,
-            party: inv.party as string,
-            ntnOrCnic: partyMap[inv.party as string] || '-',
+            name: inv.name,
+            date: inv.date,
+            party: inv.party,
+            ntnOrCnic: partyMap[inv.party] || '-',
             invoiceValue: grandTotal,
             taxableValue: netTotal,
             taxAmount: taxAmt,
@@ -188,7 +205,7 @@ export class SalesTaxReturn extends Report {
       ];
 
       reportData.push(this.getSpacerRow());
-      reportData.push(this.getHeaderRow(t`TAX SUMMARY FOR ${this.month}`));
+      reportData.push(this.getHeaderRow(t`TAX SUMMARY FOR ${monthStr}`));
       summaryRows.forEach(row => reportData.push(this.getSummaryRow(row)));
 
       this.reportData = reportData;
@@ -204,41 +221,31 @@ export class SalesTaxReturn extends Report {
   private getInvoiceRow(data: FBRInvoiceRow): ReportRow {
     const rateDisplay = data.taxRate > 0 ? `${Math.round(data.taxRate)}%` : '0% (Exempt)';
     
-    return {
-      cells: [
-        { rawValue: '', value: '', align: 'left', width: 2 },
-        { rawValue: data.name, value: data.name, align: 'left', width: 1.2 },
-        { rawValue: data.date, value: DateTime.fromISO(data.date).toFormat('dd-MMM-yy'), align: 'left', width: 1 },
-        { rawValue: data.party, value: data.party, align: 'left', width: 1.5 },
-        { rawValue: data.ntnOrCnic, value: data.ntnOrCnic, align: 'left', width: 1.2 },
-        { rawValue: data.taxableValue, value: this.fyo.format(data.taxableValue, 'Currency'), align: 'right', width: 1.2 },
-        { rawValue: rateDisplay, value: rateDisplay, align: 'right', width: 0.8 },
-        { rawValue: data.taxAmount, value: this.fyo.format(data.taxAmount, 'Currency'), align: 'right', width: 1.2 },
-      ],
-    };
+    const cells: ReportCell[] = [
+      { rawValue: '', value: '', align: 'left', width: 2 },
+      { rawValue: data.name, value: data.name, align: 'left', width: 1.2 },
+      { rawValue: data.date, value: DateTime.fromISO(data.date).toFormat('dd-MMM-yy'), align: 'left', width: 1 },
+      { rawValue: data.party, value: data.party, align: 'left', width: 1.5 },
+      { rawValue: data.ntnOrCnic, value: data.ntnOrCnic, align: 'left', width: 1.2 },
+      { rawValue: data.taxableValue, value: this.fyo.format(data.taxableValue, 'Currency'), align: 'right', width: 1.2 },
+      { rawValue: rateDisplay, value: rateDisplay, align: 'right', width: 0.8 },
+      { rawValue: data.taxAmount, value: this.fyo.format(data.taxAmount, 'Currency'), align: 'right', width: 1.2 },
+    ];
+    return { cells };
   }
 
   private getSummaryRow(data: FBRSummaryRow): ReportRow {
-    return {
-      cells: [
-        { rawValue: data.label, value: data.label, align: 'left', width: 2, bold: data.isBold, color: data.color },
-        { rawValue: '', value: '', align: 'left', width: 1.2 },
-        { rawValue: '', value: '', align: 'left', width: 1 },
-        { rawValue: '', value: '', align: 'left', width: 1.5 },
-        { rawValue: '', value: '', align: 'left', width: 1.2 },
-        { 
-          rawValue: data.taxableValue, 
-          value: this.fyo.format(data.taxableValue, 'Currency'), 
-          align: 'right', width: 1.2, bold: data.isBold 
-        },
-        { rawValue: '', value: '', align: 'right', width: 0.8 },
-        { 
-          rawValue: data.taxAmount, 
-          value: this.fyo.format(data.taxAmount, 'Currency'), 
-          align: 'right', width: 1.2, bold: data.isBold, color: data.color 
-        },
-      ],
-    };
+    const cells: ReportCell[] = [
+      { rawValue: data.label, value: data.label, align: 'left', width: 2, bold: data.isBold, color: data.color },
+      { rawValue: '', value: '', align: 'left', width: 1.2 },
+      { rawValue: '', value: '', align: 'left', width: 1 },
+      { rawValue: '', value: '', align: 'left', width: 1.5 },
+      { rawValue: '', value: '', align: 'left', width: 1.2 },
+      { rawValue: data.taxableValue, value: this.fyo.format(data.taxableValue, 'Currency'), align: 'right', width: 1.2, bold: data.isBold },
+      { rawValue: '', value: '', align: 'right', width: 0.8 },
+      { rawValue: data.taxAmount, value: this.fyo.format(data.taxAmount, 'Currency'), align: 'right', width: 1.2, bold: data.isBold, color: data.color },
+    ];
+    return { cells };
   }
 
   private getHeaderRow(title: string): ReportRow {
