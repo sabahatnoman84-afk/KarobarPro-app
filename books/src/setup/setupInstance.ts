@@ -37,29 +37,77 @@ export default async function setupInstance(
     setupWizardOptions;
 
   fyo.store.skipTelemetryLogging = true;
-  await initializeDatabase(dbPath, country, fyo);
-  await updateSystemSettings(setupWizardOptions, fyo);
-  await updateAccountingSettings(setupWizardOptions, fyo);
-  await updatePrintSettings(setupWizardOptions, fyo);
 
-  await createCurrencyRecords(fyo);
-  await createAccountRecords(bankName, country, chartOfAccounts, fyo);
-  await createRegionalRecords(country, fyo);
-  await createDefaultEntries(fyo);
-  await createDefaultNumberSeries(fyo);
-  await updateInventorySettings(fyo);
+  try {
+    await initializeDatabase(dbPath, country, fyo);
+    await updateSystemSettings(setupWizardOptions, fyo);
+    await updateAccountingSettings(setupWizardOptions, fyo);
+    await updatePrintSettings(setupWizardOptions, fyo);
 
-  if (fyo.isElectron) {
-    const { updatePrintTemplates } = await import('src/utils/printTemplates');
-    await updatePrintTemplates(fyo);
+    try {
+      await createCurrencyRecords(fyo);
+    } catch (e) {
+      console.error('❌ Error in createCurrencyRecords:', e);
+      throw e;
+    }
+
+    try {
+      await createAccountRecords(bankName, country, chartOfAccounts, fyo);
+    } catch (e) {
+      console.error('❌ Error in createAccountRecords:', e);
+      throw e;
+    }
+
+    try {
+      await createRegionalRecords(country, fyo);
+    } catch (e) {
+      console.error('❌ Error in createRegionalRecords:', e);
+      throw e;
+    }
+
+    try {
+      await createDefaultEntries(fyo);
+    } catch (e) {
+      console.error('❌ Error in createDefaultEntries:', e);
+      throw e;
+    }
+
+    try {
+      await createDefaultNumberSeries(fyo);
+    } catch (e) {
+      console.error('❌ Error in createDefaultNumberSeries:', e);
+      throw e;
+    }
+
+    try {
+      await updateInventorySettings(fyo);
+    } catch (e) {
+      console.error('❌ Error in updateInventorySettings:', e);
+      throw e;
+    }
+
+    if (fyo.isElectron) {
+      try {
+        const { updatePrintTemplates } = await import(
+          'src/utils/printTemplates'
+        );
+        await updatePrintTemplates(fyo);
+      } catch (e) {
+        console.error('❌ Error in updatePrintTemplates:', e);
+        throw e;
+      }
+    }
+
+    await completeSetup(companyName, fyo);
+    if (!Object.keys(fyo.currencySymbols).length) {
+      await setCurrencySymbols(fyo);
+    }
+  } catch (err) {
+    console.error('❌ Setup failed overall:', err);
+    throw err;
+  } finally {
+    fyo.store.skipTelemetryLogging = false;
   }
-
-  await completeSetup(companyName, fyo);
-  if (!Object.keys(fyo.currencySymbols).length) {
-    await setCurrencySymbols(fyo);
-  }
-
-  fyo.store.skipTelemetryLogging = false;
 }
 
 async function createDefaultEntries(fyo: Fyo) {

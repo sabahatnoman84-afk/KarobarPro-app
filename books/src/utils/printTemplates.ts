@@ -148,8 +148,6 @@ export async function getPrintTemplatePropValues(
       ((doc.grandTotal as Money) ?? (doc.amount as Money))?.float ?? 0;
     const payeeName = printSettings.companyName || 'KarobarPro Store';
 
-    // QR content: readable text with account and amount.
-    // Works with any Pakistani bank/wallet QR scanner.
     const paymentText = [
       `${payeeName}`,
       `Account: ${paymentAccount}`,
@@ -515,13 +513,30 @@ function getAllCSSAsStyleElem() {
 }
 
 export async function updatePrintTemplates(fyo: Fyo) {
-  const templateFiles = await ipc.getTemplates(
-    fyo.singles.PrintSettings?.posPrintWidth as number
-  );
-  const existingTemplates = (await fyo.db.getAll(ModelNameEnum.PrintTemplate, {
-    fields: ['name', 'modified'],
-    filters: { isCustom: false },
-  })) as { name: string; modified: Date }[];
+  let templateFiles: TemplateFile[] = [];
+  try {
+    const fetched = await ipc.getTemplates(
+      fyo.singles.PrintSettings?.posPrintWidth as number
+    );
+    if (fetched && Array.isArray(fetched)) {
+      templateFiles = fetched;
+    }
+  } catch (err) {
+    console.error('Failed to load template files from disk:', err);
+  }
+
+  let existingTemplates: { name: string; modified: Date }[] = [];
+  try {
+    const fetchedDb = await fyo.db.getAll(ModelNameEnum.PrintTemplate, {
+      fields: ['name', 'modified'],
+      filters: { isCustom: false },
+    });
+    if (fetchedDb && Array.isArray(fetchedDb)) {
+      existingTemplates = fetchedDb as { name: string; modified: Date }[];
+    }
+  } catch (err) {
+    console.error('Failed to load existing templates from DB:', err);
+  }
 
   const nameModifiedMap = getValueMapFromList(
     existingTemplates,
@@ -592,17 +607,6 @@ function getNameAndTypeFromTemplateFile(
   file: string,
   fyo: Fyo
 ): { name: string; type: string }[] {
-  /**
-   * Template File Name Format:
-   * TemplateName[.SchemaName].template.html
-   *
-   * If the SchemaName is absent then it is assumed
-   * that the SchemaName is:
-   * - SalesInvoice
-   * - SalesQuote
-   * - PurchaseInvoice
-   */
-
   const fileName = file.split('.template.html')[0];
   const name = fileName.split('.')[0];
   const schemaName = fileName.split('.')[1];
@@ -622,7 +626,6 @@ function getNameAndTypeFromTemplateFile(
   });
 }
 
-// --- UPGRADED FULL PAKISTANI INVOICE TEMPLATE ---
 export const baseTemplate = `
 <main class="h-full w-full bg-white text-gray-800 font-sans p-6" style="font-family: {{ print.font }};">
 
