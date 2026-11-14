@@ -282,6 +282,30 @@ async function setDefaultAccounts(fyo: Fyo) {
   if (!isSet) {
     await setDefaultAccount('roundOffAccount', fyo.t`Round Off`, fyo);
   }
+
+  // Auto-assign Default Income Account
+  const incomeAccounts = (await fyo.db.getAllRaw('Account', {
+    filters: { rootType: AccountRootTypeEnum.Income, isGroup: false },
+    limit: 1,
+  })) as { name: string }[];
+  if (incomeAccounts.length > 0) {
+    await fyo.singles.AccountingSettings!.setAndSync(
+      'defaultIncomeAccount',
+      incomeAccounts[0].name
+    );
+  }
+
+  // Auto-assign Default Expense Account
+  const expenseAccounts = (await fyo.db.getAllRaw('Account', {
+    filters: { rootType: AccountRootTypeEnum.Expense, isGroup: false },
+    limit: 1,
+  })) as { name: string }[];
+  if (expenseAccounts.length > 0) {
+    await fyo.singles.AccountingSettings!.setAndSync(
+      'defaultExpenseAccount',
+      expenseAccounts[0].name
+    );
+  }
 }
 
 async function setDefaultAccount(key: string, accountName: string, fyo: Fyo) {
