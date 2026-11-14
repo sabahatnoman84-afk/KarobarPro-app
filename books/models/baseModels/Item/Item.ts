@@ -37,34 +37,44 @@ export class Item extends Doc {
   formulas: FormulaMap = {
     incomeAccount: {
       formula: async () => {
-        let accountName = 'Service';
-        if (this.itemType === 'Product') {
-          accountName = 'Sales';
-        }
-
-        const accountExists = await this.fyo.db.exists('Account', accountName);
-        return accountExists ? accountName : '';
+        // FIX: Fetch the first available Income account from the DB
+        // instead of hardcoding the name 'Sales' or 'Service'
+        const incomeAccounts = await this.fyo.db.getAllRaw('Account', {
+          filters: { rootType: AccountRootTypeEnum.Income, isGroup: false },
+          limit: 1,
+        });
+        return incomeAccounts.length > 0 ? (incomeAccounts[0].name as string) : '';
       },
       dependsOn: ['itemType'],
     },
     expenseAccount: {
       formula: async () => {
         if (this.trackItem) {
-          return this.fyo.singles.InventorySettings
-            ?.stockReceivedButNotBilled as string;
+          const srbnb = await this.fyo.db.getAllRaw('Account', {
+            filters: { rootType: AccountRootTypeEnum.Liability, isGroup: false },
+            limit: 1,
+          });
+          return srbnb.length > 0 ? (srbnb[0].name as string) : '';
         }
 
-        const cogs = await this.fyo.db.getAllRaw('Account', {
+        // Try to find Cost of Goods Sold first
+        let accounts = await this.fyo.db.getAllRaw('Account', {
           filters: {
             accountType: AccountTypeEnum['Cost of Goods Sold'],
+            isGroup: false,
           },
+          limit: 1,
         });
 
-        if (cogs.length === 0) {
-          return '';
-        } else {
-          return cogs[0].name as string;
+        // Fallback to any Expense account
+        if (accounts.length === 0) {
+          accounts = await this.fyo.db.getAllRaw('Account', {
+            filters: { rootType: AccountRootTypeEnum.Expense, isGroup: false },
+            limit: 1,
+          });
         }
+
+        return accounts.length > 0 ? (accounts[0].name as string) : '';
       },
       dependsOn: ['itemType', 'trackItem'],
     },
